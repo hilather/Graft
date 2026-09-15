@@ -202,6 +202,7 @@ class PerlExtractor {
     }
     if (OPAQUE_PERL.has(type) || type === "__DATA__" || type === "__END__") {
       if (type === "substitution_regexp" && this.substitution(node, ctx)) return;
+      if (this.interpolation(node, ctx)) return;
       if (hasEmbeddedCode(node)) this.diagnostic("PERL_EMBEDDED_CODE_UNSUPPORTED", "Executable interpolation or regex code is not traversed", node);
       return;
     }
@@ -284,15 +285,39 @@ class PerlExtractor {
     const modifiers = node.childForFieldName("modifiers")?.text ?? "";
     if ([...modifiers].filter(flag => flag === "e").length !== 1) return false;
     const pattern = node.childForFieldName("content");
-    if (pattern && (hasEmbeddedCode(pattern) || /(?:^|[^\\])(?:\\\\)*\(\?\??\{/.test(pattern.text))) return false;
+    if (pattern && /(?:^|[^\\])(?:\\\\)*\(\?\??\{/.test(pattern.text)) return false;
     const replacement = node.namedChildren.find(child => child.type === "replacement");
     const block = replacement && this.parseEmbedded?.(replacement);
     if (!block) return false;
+    if (pattern) this.interpolationExpressions(pattern, ctx);
     // The expression runs only after a match, possibly repeatedly with /g.
     // Its implicit block confines lexicals while retaining the enclosing
     // routine's package, arguments, phase, and graph owner.
     this.walk(block, { ...ctx, conditional: true });
     return true;
+  }
+
+  private interpolation(node: Node, ctx: WalkContext): boolean {
+    if (!["interpolated_string_literal", "command_string", "quoted_regexp", "match_regexp", "substitution_regexp"].includes(node.type)) return false;
+    if (node.type === "substitution_regexp" && /e/.test(node.childForFieldName("modifiers")?.text ?? "")) return false;
+    const content = node.childForFieldName("content");
+    if (content?.type === "regexp_content" && /(?:^|[^\\])(?:\\\\)*\(\?\??\{/.test(content.text)) return false;
+    if (content) this.interpolationExpressions(content, ctx);
+    if (node.type === "substitution_regexp") {
+      const replacement = node.namedChildren.find(child => child.type === "replacement");
+      if (replacement) this.interpolationExpressions(replacement, { ...ctx, conditional: true });
+    }
+    return true;
+  }
+
+  private interpolationExpressions(node: Node, ctx: WalkContext): void {
+    const pending = [...node.namedChildren].reverse();
+    while (pending.length) {
+      const child = pending.pop()!;
+      if (["block", "function_call_expression", "method_call_expression", "coderef_call_expression"].includes(child.type)) {
+        this.walk(child, ctx);
+      } else if (!OPAQUE_PERL.has(child.type)) pending.push(...[...child.namedChildren].reverse());
+    }
   }
 
   private declaration(node: Node, ctx: WalkContext): void {

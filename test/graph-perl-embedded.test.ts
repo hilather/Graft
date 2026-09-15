@@ -54,7 +54,6 @@ test("additional eval, regex code, escaped delimiters, and malformed replacement
     String.raw`$text =~ s/x/'a\/b'/e;`,
     '$text =~ s{x}{broken(}e;',
     '$text =~ s{x}{x +}e;',
-    '$text =~ s{x}{${\\interpolation()}}g;',
   ]) {
     const result = await extract(source);
     assert.ok(result.languageData.diagnostics.some(diagnostic => diagnostic.code === "PERL_EMBEDDED_CODE_UNSUPPORTED"), source);

@@ -3,7 +3,7 @@
 import type { RawEdge } from "./extract.js";
 import type { NodeV1, Confidence } from "./types.js";
 
-export const PERL_FACTS_VERSION = 8 as const;
+export const PERL_FACTS_VERSION = 9 as const;
 export const PERL_MAX_SOURCE_CODE_UNITS = 2_000_000;
 
 export interface PerlRange {

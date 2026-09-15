@@ -203,8 +203,8 @@ test("F07: quotes, multiple heredocs, POD and data never mint fake symbols or in
   assert.deepEqual(ended.languageData.definitions.map((d) => d.qualifiedName), ["main::real"]);
   assert.deepEqual(ended.languageData.calls, []);
   const embedded = await extract("embedded.pm", 'sub actual { s/x/replacement_helper()/e; qr/(?{ regex_helper() })/; my $x = "@{[interpolation_helper()]}"; }');
-  assert.equal(embedded.languageData.diagnostics.filter((d) => d.code === "PERL_EMBEDDED_CODE_UNSUPPORTED").length, 2);
-  assert.deepEqual(embedded.languageData.calls.map(call => call.name.kind === "known" && call.name.value), ["replacement_helper"]);
+  assert.equal(embedded.languageData.diagnostics.filter((d) => d.code === "PERL_EMBEDDED_CODE_UNSUPPORTED").length, 1);
+  assert.deepEqual(embedded.languageData.calls.map(call => call.name.kind === "known" && call.name.value), ["replacement_helper", "interpolation_helper"]);
 });
 
 test("F08: UTF-16 source coordinates, CRLF, signatures, prototypes, attributes and versioned packages", async () => {
