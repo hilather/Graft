@@ -159,14 +159,22 @@ function searchBody(text: string, max = MAX_BODY_CHARS): string {
  * whole file. Far leaner than storing full-file bodies (no symbol duplication). */
 function fileResidual(source: string, symbols: NodeV1[]): string {
   const lines = source.split("\n");
-  const covered = new Uint8Array(lines.length + 2);
+  const changes = new Int32Array(lines.length + 2);
   for (const s of symbols) {
     const m = s.span.match(/^L(\d+)-L(\d+)$/);
     if (!m) continue;
-    for (let r = Number(m[1]); r <= Number(m[2]) && r < covered.length; r++) covered[r] = 1;
+    const start = Math.max(1, Number(m[1]));
+    const end = Math.min(lines.length, Number(m[2]));
+    if (start > end) continue;
+    changes[start]++;
+    changes[end + 1]--;
   }
   const kept: string[] = [];
-  for (let i = 0; i < lines.length; i++) if (!covered[i + 1]) kept.push(lines[i]);
+  let covered = 0;
+  for (let i = 0; i < lines.length; i++) {
+    covered += changes[i + 1];
+    if (covered === 0) kept.push(lines[i]);
+  }
   return searchBody(kept.join(" "), MAX_FILE_BODY_CHARS);
 }
 

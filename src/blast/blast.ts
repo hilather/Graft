@@ -13,7 +13,8 @@
  * not of everything the file happens to define. The file node is seeded too, so
  * importers (whose edge targets the file, not the symbol) are still found.
  */
-import { impactOfMany, type EdgeHit } from "../graph/traverse.js";
+import { impactWithViews, type EdgeHit } from "../graph/traverse.js";
+import { graphViews, type GraphViews } from "../graph/views.js";
 import type { GraphV1, NodeV1 } from "../graph/types.js";
 import { isPerlTestPath } from "../graph/test-path.js";
 import { dirLabel, moduleIndex, parentDir, shortLabel, type ModuleIndex } from "./modules.js";
@@ -152,10 +153,10 @@ function spanBounds(span: string): { start: number; end: number } | null {
  * who touches any part of `Cache`. Nesting is resolved by keeping, for each range,
  * only symbols that contain no other matched symbol.
  */
-function seedsForFile(graph: GraphV1, path: string, ranges: { start: number; end: number }[]): NodeV1[] {
+function seedsForFile(views: GraphViews, path: string, ranges: { start: number; end: number }[]): NodeV1[] {
   const symbols: { node: NodeV1; start: number; end: number }[] = [];
-  for (const n of graph.nodes) {
-    if (n.kind === "file" || n.path !== path) continue;
+  for (const n of views.nodesByPath.get(path) ?? []) {
+    if (n.kind === "file") continue;
     const b = spanBounds(n.span);
     if (b) symbols.push({ node: n, ...b });
   }
@@ -183,6 +184,7 @@ export function blastRadius(
   basis: string,
   opts: BlastOptions,
 ): BlastReport {
+  const views = graphViews(graph);
   const fileNodes = new Map<string, NodeV1>();
   for (const n of graph.nodes) if (n.kind === "file") fileNodes.set(n.path, n);
   const isTest = (path: string) => TEST_PATH.test(path) || isPerlTestPath(path, fileNodes.get(path)?.language);
@@ -209,7 +211,7 @@ export function blastRadius(
 
     // No hunk ranges (a rename with no content change, a mode change) or an added
     // file: the unit of change is the file itself.
-    const symbolSeeds = file.ranges.length > 0 ? seedsForFile(graph, file.path, file.ranges) : [];
+    const symbolSeeds = file.ranges.length > 0 ? seedsForFile(views, file.path, file.ranges) : [];
     for (const node of symbolSeeds) {
       seeds.push({ id: node.id, name: node.name, kind: node.kind, path: node.path, span: node.span, wholeFile: false });
     }
@@ -223,9 +225,8 @@ export function blastRadius(
     // One walk PER CHANGED FILE, not one walk over every seed at once. A combined
     // walk records the depth a node was first reached at but not by which seed, so
     // the diagram could only draw "every changed file reaches every module" — a
-    // cross-product that tells a reviewer nothing. Walking per file costs one
-    // adjacency build each (cheap: the graph is already in memory) and buys arrows
-    // that are true.
+    // cross-product that tells a reviewer nothing. The walks share lookup tables
+    // while retaining each changed file's distinct provenance.
     //
     // The FILE node is a seed only when no symbol matched. `imports` edges target
     // the file id, so seeding it alongside symbols would pull in every importer of
@@ -236,7 +237,7 @@ export function blastRadius(
     // only dependents there are.
     const walkSeeds = symbolSeeds.length > 0 ? symbolSeeds : [fileNode];
     seedNodes.set(file.path, walkSeeds);
-    const hits = impactOfMany(graph, walkSeeds, opts.depth, "in");
+    const hits = impactWithViews(views, walkSeeds, opts.depth, "in");
     for (const h of hits) {
       if (!hasNode(h)) continue;
       const hit = toImpacted(h);

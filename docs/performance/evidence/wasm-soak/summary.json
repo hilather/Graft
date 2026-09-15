@@ -1,0 +1,21 @@
+{
+  "exactParity": true,
+  "report": [
+    {
+      "variant": "reference",
+      "samples": 7,
+      "medianElapsedMs": 4709.61615,
+      "medianPeakRssMiB": 254.3359375,
+      "medianRssGrowthMiB": 183.69921875,
+      "medianExternalGrowthMiB": 104.79434299468994
+    },
+    {
+      "variant": "candidate",
+      "samples": 7,
+      "medianElapsedMs": 4217.452963,
+      "medianPeakRssMiB": 119.4609375,
+      "medianRssGrowthMiB": 48.95703125,
+      "medianExternalGrowthMiB": -1.2021799087524414
+    }
+  ]
+}

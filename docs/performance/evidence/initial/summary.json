@@ -1,0 +1,252 @@
+[
+  {
+    "scenario": "grep.synthetic",
+    "samplesPerVariant": 20,
+    "reference": {
+      "medianMs": 438.13318900000013,
+      "minMs": 395.5771749999999,
+      "maxMs": 676.591113,
+      "medianCpuMs": 510.25,
+      "medianPeakRssMiB": 103.421875,
+      "counts": {
+        "nodes": 13500,
+        "edges": 24000,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "candidate": {
+      "medianMs": 36.35884599999997,
+      "minMs": 32.063225999999986,
+      "maxMs": 74.677997,
+      "medianCpuMs": 48.724999999999994,
+      "medianPeakRssMiB": 104.376953125,
+      "counts": {
+        "nodes": 13500,
+        "edges": 24000,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "improvementPercent": 91.70141707753622,
+    "exactParity": true
+  },
+  {
+    "scenario": "blast.synthetic",
+    "samplesPerVariant": 20,
+    "reference": {
+      "medianMs": 672.8134834999998,
+      "minMs": 601.5887240000002,
+      "maxMs": 1226.9020099999998,
+      "medianCpuMs": 716.265,
+      "medianPeakRssMiB": 173.46875,
+      "counts": {
+        "nodes": 13500,
+        "edges": 24000,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "candidate": {
+      "medianMs": 48.116018999999994,
+      "minMs": 35.02004499999998,
+      "maxMs": 114.120635,
+      "medianCpuMs": 109.8475,
+      "medianPeakRssMiB": 120.30078125,
+      "counts": {
+        "nodes": 13500,
+        "edges": 24000,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "improvementPercent": 92.84853526571752,
+    "exactParity": true
+  },
+  {
+    "scenario": "traverse.loaded",
+    "samplesPerVariant": 20,
+    "reference": {
+      "medianMs": 743.7090289999999,
+      "minMs": 576.3219770000001,
+      "maxMs": 929.5928490000001,
+      "medianCpuMs": 805.6765,
+      "medianPeakRssMiB": 220.63671875,
+      "counts": {
+        "nodes": 13500,
+        "edges": 24000,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "candidate": {
+      "medianMs": 0.7963314999999795,
+      "minMs": 0.42211100000002943,
+      "maxMs": 4.2699799999999755,
+      "medianCpuMs": 2.275,
+      "medianPeakRssMiB": 128.375,
+      "counts": {
+        "nodes": 13500,
+        "edges": 24000,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "improvementPercent": 99.89292432000312,
+    "exactParity": true
+  },
+  {
+    "scenario": "projections.unchanged",
+    "samplesPerVariant": 20,
+    "reference": {
+      "medianMs": 206.84227149999992,
+      "minMs": 178.5820990000002,
+      "maxMs": 392.6100200000001,
+      "medianCpuMs": 267.201,
+      "medianPeakRssMiB": 122.326171875,
+      "counts": {
+        "nodes": 13500,
+        "edges": 24000,
+        "projectionFilesReplaced": 1501,
+        "projectionBytesReplaced": 1068572
+      }
+    },
+    "candidate": {
+      "medianMs": 211.81052799999986,
+      "minMs": 186.40005599999995,
+      "maxMs": 351.44086500000003,
+      "medianCpuMs": 294.355,
+      "medianPeakRssMiB": 122.52734375,
+      "counts": {
+        "nodes": 13500,
+        "edges": 24000,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "improvementPercent": -2.401954138276774,
+    "exactParity": true
+  },
+  {
+    "scenario": "extract.rust",
+    "samplesPerVariant": 20,
+    "reference": {
+      "medianMs": 161.481494,
+      "minMs": 100.800925,
+      "maxMs": 285.95683799999983,
+      "medianCpuMs": 242.035,
+      "medianPeakRssMiB": 146.54296875,
+      "counts": {
+        "definitions": 1200,
+        "references": 2400,
+        "sourceBytes": 47069,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "candidate": {
+      "medianMs": 169.67267500000003,
+      "minMs": 129.85010300000022,
+      "maxMs": 267.8946880000001,
+      "medianCpuMs": 275.7405,
+      "medianPeakRssMiB": 147.9296875,
+      "counts": {
+        "definitions": 1200,
+        "references": 2400,
+        "sourceBytes": 47069,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "improvementPercent": -5.07251995080007,
+    "exactParity": true
+  },
+  {
+    "scenario": "build.real.cold",
+    "samplesPerVariant": 7,
+    "reference": {
+      "medianMs": 19956.759253,
+      "minMs": 14719.783198,
+      "maxMs": 23300.492333,
+      "medianCpuMs": 19893.378,
+      "medianPeakRssMiB": 337.52734375,
+      "counts": {
+        "files": 325,
+        "parsed": 325,
+        "reused": 0,
+        "nodes": 2548,
+        "edges": 7636,
+        "errors": [
+          "test/fixtures/perl/lexical.pm: PERL_TARGET_UNRESOLVED: Cannot establish one source target for unknown; PERL_TARGET_UNRESOLVED: Cannot establish one source target for $handler; PERL_TARGET_UNRESOLVED: Cannot establish one source target for callback"
+        ],
+        "projectionFilesReplaced": 326,
+        "projectionBytesReplaced": 242512
+      }
+    },
+    "candidate": {
+      "medianMs": 17825.323319000003,
+      "minMs": 14626.257884999999,
+      "maxMs": 26052.236175,
+      "medianCpuMs": 18491.215,
+      "medianPeakRssMiB": 336.26953125,
+      "counts": {
+        "files": 325,
+        "parsed": 325,
+        "reused": 0,
+        "nodes": 2548,
+        "edges": 7636,
+        "errors": [
+          "test/fixtures/perl/lexical.pm: PERL_TARGET_UNRESOLVED: Cannot establish one source target for unknown; PERL_TARGET_UNRESOLVED: Cannot establish one source target for $handler; PERL_TARGET_UNRESOLVED: Cannot establish one source target for callback"
+        ],
+        "projectionFilesReplaced": 326,
+        "projectionBytesReplaced": 242512
+      }
+    },
+    "improvementPercent": 10.680270814408853,
+    "exactParity": true
+  },
+  {
+    "scenario": "build.real.unchanged",
+    "samplesPerVariant": 7,
+    "reference": {
+      "medianMs": 461.59498899999744,
+      "minMs": 421.4431199999999,
+      "maxMs": 629.1486409999998,
+      "medianCpuMs": 705.807,
+      "medianPeakRssMiB": 396.31640625,
+      "counts": {
+        "files": 325,
+        "parsed": 0,
+        "reused": 325,
+        "nodes": 2548,
+        "edges": 7636,
+        "errors": [
+          "test/fixtures/perl/lexical.pm: PERL_TARGET_UNRESOLVED: Cannot establish one source target for unknown; PERL_TARGET_UNRESOLVED: Cannot establish one source target for $handler; PERL_TARGET_UNRESOLVED: Cannot establish one source target for callback"
+        ],
+        "projectionFilesReplaced": 326,
+        "projectionBytesReplaced": 242512
+      }
+    },
+    "candidate": {
+      "medianMs": 575.1648989999994,
+      "minMs": 432.66658599999937,
+      "maxMs": 648.1295659999996,
+      "medianCpuMs": 794.938,
+      "medianPeakRssMiB": 386.53125,
+      "counts": {
+        "files": 325,
+        "parsed": 0,
+        "reused": 325,
+        "nodes": 2548,
+        "edges": 7636,
+        "errors": [
+          "test/fixtures/perl/lexical.pm: PERL_TARGET_UNRESOLVED: Cannot establish one source target for unknown; PERL_TARGET_UNRESOLVED: Cannot establish one source target for $handler; PERL_TARGET_UNRESOLVED: Cannot establish one source target for callback"
+        ],
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "improvementPercent": -24.603800454168834,
+    "exactParity": true
+  }
+]

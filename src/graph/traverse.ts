@@ -12,8 +12,8 @@
  * `loadGraphCached`), which keeps this module trivially unit-testable against
  * hand-built fixture graphs.
  */
-import type { EdgeV1, GraphV1, NodeV1, Relation } from "./types.js";
-import { WALK_RELATIONS } from "./relations.js";
+import type { GraphV1, NodeV1, Relation } from "./types.js";
+import { graphViews, type GraphViews } from "./views.js";
 import { assertPrefixIndexed, pathUnderPrefix } from "./scopes.js";
 import { normalizePathPrefix } from "../util/paths.js";
 
@@ -127,10 +127,10 @@ export interface EdgeHit {
 
 /** Depth-1: nodes with a walk-relation edge whose target is `symbol`. */
 export function callersOf(graph: GraphV1, symbol: NodeV1): EdgeHit[] {
-  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const views = graphViews(graph);
+  const byId = views.byId;
   const hits: EdgeHit[] = [];
-  for (const e of graph.edges as EdgeV1[]) {
-    if (!WALK_RELATIONS.has(e.relation) || e.target !== symbol.id) continue;
+  for (const e of views.walkEdges("in").get(symbol.id) ?? []) {
     hits.push({ node: byId.get(e.source) ?? null, id: e.source, relation: e.relation, depth: 1 });
   }
   return hits;
@@ -138,10 +138,10 @@ export function callersOf(graph: GraphV1, symbol: NodeV1): EdgeHit[] {
 
 /** Depth-1: walk-relation edges whose source is `symbol`. */
 export function calleesOf(graph: GraphV1, symbol: NodeV1): EdgeHit[] {
-  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const views = graphViews(graph);
+  const byId = views.byId;
   const hits: EdgeHit[] = [];
-  for (const e of graph.edges as EdgeV1[]) {
-    if (!WALK_RELATIONS.has(e.relation) || e.source !== symbol.id) continue;
+  for (const e of views.walkEdges("out").get(symbol.id) ?? []) {
     hits.push({ node: byId.get(e.target) ?? null, id: e.target, relation: e.relation, depth: 1 });
   }
   return hits;
@@ -174,21 +174,13 @@ export function impactOf(graph: GraphV1, symbol: NodeV1, maxDepth = 2): EdgeHit[
  * reported once, at the depth it was first reached from *any* seed.
  */
 export function impactOfMany(graph: GraphV1, seeds: NodeV1[], maxDepth = 2, direction: Direction = "in"): EdgeHit[] {
-  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  return impactWithViews(graphViews(graph), seeds, maxDepth, direction);
+}
 
-  // Adjacency keyed for the walk direction, restricted to walk relations:
-  //   'in'  → key = edge.target, neighbour = edge.source (who points AT key)
-  //   'out' → key = edge.source, neighbour = edge.target (what key points TO)
-  const adj = new Map<string, { other: string; relation: Relation }[]>();
-  for (const e of graph.edges as EdgeV1[]) {
-    if (!WALK_RELATIONS.has(e.relation)) continue;
-    const key = direction === "in" ? e.target : e.source;
-    const other = direction === "in" ? e.source : e.target;
-    const entry = { other, relation: e.relation };
-    const arr = adj.get(key);
-    if (arr) arr.push(entry);
-    else adj.set(key, [entry]);
-  }
+/** Request-local preparation can be shared across distinct provenance walks. */
+export function impactWithViews(views: GraphViews, seeds: NodeV1[], maxDepth = 2, direction: Direction = "in"): EdgeHit[] {
+  const byId = views.byId;
+  const adj = views.walkEdges(direction);
 
   const visited = new Set<string>(seeds.map((s) => s.id));
   const hits: EdgeHit[] = [];
@@ -197,7 +189,9 @@ export function impactOfMany(graph: GraphV1, seeds: NodeV1[], maxDepth = 2, dire
   for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth++) {
     const next: string[] = [];
     for (const current of frontier) {
-      for (const { other, relation } of adj.get(current) ?? []) {
+      for (const edge of adj.get(current) ?? []) {
+        const other = direction === "in" ? edge.source : edge.target;
+        const relation = edge.relation;
         if (visited.has(other)) continue;
         visited.add(other);
         hits.push({ node: byId.get(other) ?? null, id: other, relation, depth });
@@ -213,7 +207,7 @@ export function impactOfMany(graph: GraphV1, seeds: NodeV1[], maxDepth = 2, dire
 /** Every non-file node whose `path` equals `fileNode.path` — the symbols
  * defined in that file. */
 function symbolsInFile(graph: GraphV1, fileNode: NodeV1): NodeV1[] {
-  return graph.nodes.filter((n) => n.kind !== "file" && n.path === fileNode.path);
+  return (graphViews(graph).nodesByPath.get(fileNode.path) ?? []).filter((n) => n.kind !== "file");
 }
 
 /**

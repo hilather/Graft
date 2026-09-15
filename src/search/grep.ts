@@ -12,6 +12,7 @@
 import { join } from "node:path";
 import type { GraphV1, NodeV1 } from "../graph/types.js";
 import { WALK_RELATIONS } from "../graph/relations.js";
+import { graphViews } from "../graph/views.js";
 import { assertPrefixIndexed, pathUnderPrefix } from "../graph/scopes.js";
 import { normalizePathPrefix } from "../util/paths.js";
 import { savingsFor, type Savings } from "../context/savings.js";
@@ -97,10 +98,10 @@ interface SymbolSpan {
 
 /** The file's symbol nodes, sorted ascending by span start — the order
  * `enclosingSymbol` scans in to find the innermost containing span. */
-function symbolsOf(graph: GraphV1, path: string): SymbolSpan[] {
+function symbolsOf(nodes: NodeV1[]): SymbolSpan[] {
   const out: SymbolSpan[] = [];
-  for (const n of graph.nodes) {
-    if (n.kind === "file" || n.path !== path) continue;
+  for (const n of nodes) {
+    if (n.kind === "file") continue;
     const b = spanBounds(n.span);
     if (b) out.push({ node: n, start: b.start, end: b.end });
   }
@@ -143,6 +144,7 @@ export function grepGraph(graph: GraphV1, repoRoot: string, pattern: string, opt
   const regex = new RegExp(source, opts.ignoreCase ? "i" : "");
 
   const inDegree = computeInDegree(graph);
+  const nodesByPath = graphViews(graph).nodesByPath;
   // Same segment-aware prefix rule as `ask --in` / `callers --in`, and the same
   // loud failure when it matches nothing — `--in` used to mean a bare substring
   // here and a path prefix there, so `--in src` also swept up `lib/mysrc/`.
@@ -171,7 +173,7 @@ export function grepGraph(graph: GraphV1, repoRoot: string, pattern: string, opt
       continue;
     }
 
-    const symbols = symbolsOf(graph, file.path);
+    const symbols = symbolsOf(nodesByPath.get(file.path) ?? []);
     const lines = text.split("\n");
 
     for (let i = 0; i < lines.length; i++) {

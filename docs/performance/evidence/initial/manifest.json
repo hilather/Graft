@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-15T02:17:23.457Z",
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "linux",
+    "arch": "x64",
+    "cpuModel": "Intel(R) Core(TM) i7-6600U CPU @ 2.60GHz",
+    "logicalCpus": 4,
+    "memoryBytes": 33024827392,
+    "locale": "en-US",
+    "osCache": "uncontrolled; application cache specified per scenario",
+    "workerCount": 0
+  },
+  "workspace": "/tmp/graft-performance-Tfnk2a",
+  "reference": "/tmp/graft-perf-reference.WOHNZn",
+  "candidate": "/home/brewerm/git/Graft",
+  "commit": "b90d73b2f601ec0d2b132c3901658882630753f8",
+  "candidateDiffSha256": "0c1db81ce6e74095a40a8c6e2fd1930ea1b2bece2e53a72f8ccdb07bd6e21a89",
+  "lockfileSha256": "6d3785b12a1c7477d98a36908c768410873e19c35c114ff937d3d9e91f62c2fe",
+  "referenceDistSha256": "a9f46ca60aa1ea480fb3918cb5c9ddddc8d1bc7777d3430c923418ff30d7a42e",
+  "candidateDistSha256": "0bf6aa6a93a27c71ae256e9db6907983b6d41c2a187f318149e0edff746c9260",
+  "workloads": {
+    "synthetic": {
+      "sourceFiles": 1500,
+      "sourceBytes": 589620,
+      "sha256": "ec06d617ba0d53a3ecdaf18bac50195c1a514bd06eccdbeeb39f2a7123afbe59",
+      "nodes": 13500,
+      "edges": 24000
+    },
+    "real": {
+      "sourceFiles": 353,
+      "sourceBytes": 8333388,
+      "sha256": "e4b88b43bf429e76ebc401aee8ecb6adf8d88ed7be21cbd476ebe852583f44dc"
+    },
+    "graphSha256": "c271a4191b6963e9566dfff0dc927c65ebac3c4cfb51daa3379afdb24a1caf14"
+  },
+  "inventoryNote": "Per-file inventories omitted; aggregate corpus hashes and counts retained. Original inventories are in commit 0605e5c."
+}

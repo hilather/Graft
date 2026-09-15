@@ -264,13 +264,14 @@ export function federateAsk(
 
   // Pass 1: run each child's ask; keep its hits + RAW top-hit coverage.
   const runs: ChildRun[] = [];
-  for (const { child } of wg.loaded) {
+  for (const { child, graph } of wg.loaded) {
     if (onlyChild && child !== onlyChild) continue;
     let r: AskResult;
     try {
       // Over-fetch per child so cross-child fusion has enough candidates to
       // rank before the final `limit` slice.
       r = ask(join(root, child), query, {
+        preloadedGraph: graph,
         limit: Math.max(limit * 4, 20),
         source: opts.source,
         full: opts.full,

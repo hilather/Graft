@@ -1,0 +1,23 @@
+{
+  "node": "v20.20.2",
+  "definitions": 6000,
+  "queries": 12000,
+  "exactParity": true,
+  "scope": "isolated interval lookup; excludes parsing, queries and extraction",
+  "report": [
+    {
+      "variant": "reference",
+      "samples": 20,
+      "medianMs": 284.8477264999997,
+      "minMs": 209.4856009999994,
+      "maxMs": 746.3690869999991
+    },
+    {
+      "variant": "candidate",
+      "samples": 20,
+      "medianMs": 1.8151354999999967,
+      "minMs": 1.0212729999993826,
+      "maxMs": 4.26547600000049
+    }
+  ]
+}

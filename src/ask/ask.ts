@@ -160,7 +160,7 @@ interface Corpus {
   askIndex: AskIndex | null;
 }
 
-function loadCorpus(outDir: string): Corpus {
+function loadCorpus(outDir: string, preloadedGraph?: GraphV1): Corpus {
   const concepts: Corpus["concepts"] = [];
   if (existsSync(outDir)) {
     for (const entry of readdirSync(outDir)) {
@@ -184,7 +184,7 @@ function loadCorpus(outDir: string): Corpus {
       });
     }
   }
-  return { concepts, graph: loadGraphCached(outDir), askIndex: loadAskIndexCached(outDir) };
+  return { concepts, graph: preloadedGraph ?? loadGraphCached(outDir), askIndex: loadAskIndexCached(outDir) };
 }
 
 /** Score a document's token counts against the query counts (name field
@@ -1207,6 +1207,8 @@ function lexical(
 
 export interface AskOptions {
   contextDir?: string;
+  /** @internal Reuse the workspace request's already-loaded graph snapshot. */
+  preloadedGraph?: GraphV1;
   limit?: number;
   /** Inline the source at each `path:Lx-Ly` hit, sliced from `dir`. Turns the
    * pack from a locator into a retriever so the agent needn't re-open the file. */
@@ -1320,7 +1322,7 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
   const root = resolve(dir);
   const outDir = contextDirFor(root, opts.contextDir);
   const limit = opts.limit ?? 8;
-  const corpus = loadCorpus(outDir);
+  const corpus = loadCorpus(outDir, opts.preloadedGraph);
   const graphRank = opts.graphRank ?? true;
   const fileFirst = opts.fileFirst ?? true;
   // The production path uses bounded file scoring plus an exact baseline top lock.

@@ -14,7 +14,7 @@
  * `summary` when present (after `graft build --deep`), else its deterministic
  * `signature`, so cards are useful even in a $0 structure-only build.
  */
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, existsSync, readdirSync, rmSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { relPosix } from "../util/paths.js";
@@ -22,6 +22,7 @@ import matter from "gray-matter";
 import type { GraphV1, NodeV1 } from "./types.js";
 import { CACHE_DIR, readNodes } from "../context/node-file.js";
 import { GRAPH_DIR } from "./write.js";
+import { writeProjection, type ProjectionWrites } from "../util/projection.js";
 
 const INDEX_FILE = "INDEX.md";
 /** Where a root-level file card goes when `graft/<stem>.md` is already a concept
@@ -220,7 +221,7 @@ function pruneEmptyDirs(outDir: string): void {
  * Write one wiring card per source file into `outDir`, mirroring the source tree,
  * and prune cards whose source no longer exists. Returns what changed.
  */
-export function writeCards(graph: GraphV1, outDir: string): CardStats {
+export function writeCards(graph: GraphV1, outDir: string, writes?: ProjectionWrites): CardStats {
   const byPath = new Map<string, NodeV1[]>();
   for (const n of graph.nodes) {
     const list = byPath.get(n.path) ?? [];
@@ -238,7 +239,7 @@ export function writeCards(graph: GraphV1, outDir: string): CardStats {
     const symbols = group.filter((n) => n.kind !== "file");
     const cardPath = paths.get(sourcePath)!;
     mkdirSync(dirname(cardPath), { recursive: true });
-    writeFileSync(cardPath, renderCard(sourcePath, fileNode, symbols, concepts.get(sourcePath) ?? []));
+    writeProjection(cardPath, renderCard(sourcePath, fileNode, symbols, concepts.get(sourcePath) ?? []), writes);
     written.add(realpathSync(cardPath));
     files.push({ card: relPosix(outDir, cardPath), path: sourcePath, symbols: symbols.length });
   }
@@ -260,7 +261,7 @@ export function writeCards(graph: GraphV1, outDir: string): CardStats {
  * Write `graft/INDEX.md` — the roster an agent `cat`s to orient. Lists the concept
  * nodes on disk and the per-file cards. Deterministic order; no timestamps.
  */
-export function writeIndex(outDir: string, files: CardFileInfo[]): void {
+export function writeIndex(outDir: string, files: CardFileInfo[], writes?: ProjectionWrites): void {
   const lines: string[] = [
     "# graft — repo map",
     "",
@@ -310,7 +311,7 @@ export function writeIndex(outDir: string, files: CardFileInfo[]): void {
     }
   }
 
-  writeFileSync(join(outDir, INDEX_FILE), lines.join("\n"));
+  writeProjection(join(outDir, INDEX_FILE), lines.join("\n"), writes);
 }
 
 /** One symbol a concept node covers: its name, kind, and `path:span` pointer. */
@@ -335,7 +336,7 @@ export interface CoverRef {
  * On a $0 structure-only build there are no concept nodes, so this is a no-op.
  * Returns the number of nodes enriched.
  */
-export function writeCovers(graph: GraphV1, outDir: string): number {
+export function writeCovers(graph: GraphV1, outDir: string, writes?: ProjectionWrites): number {
   if (!existsSync(outDir)) return 0;
 
   const symbolsByPath = new Map<string, NodeV1[]>();
@@ -370,7 +371,7 @@ export function writeCovers(graph: GraphV1, outDir: string): number {
 
     // Re-stringify with covers appended last, so re-runs produce a stable diff.
     const { covers: _prev, ...rest } = parsed.data as Record<string, unknown>;
-    writeFileSync(full, matter.stringify(parsed.content, { ...rest, covers }));
+    writeProjection(full, matter.stringify(parsed.content, { ...rest, covers }), writes);
     enriched++;
   }
   return enriched;

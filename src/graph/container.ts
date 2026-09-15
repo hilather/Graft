@@ -22,7 +22,7 @@
  * fixtures whose true line numbers are known.
  */
 import { extractFile, mintId, type ExtractResult, type Language, type RawEdge } from "./extract.js";
-import { loadWasmLanguage, parseWasm, type TsNode } from "./generic.js";
+import { loadWasmLanguage, withWasmTree, type TsNode } from "./generic.js";
 import { contentHash } from "../util/id.js";
 import type { NodeV1 } from "./types.js";
 
@@ -154,9 +154,8 @@ export function extractContainer(rel: string, source: string, lang: ContainerLan
   const residuals: string[] = [];
 
   const language = loaded.get(lang.name);
-  const root = language ? parseWasm(language, source) : null;
-
-  if (root) {
+  if (language) withWasmTree(language, source, (root) => {
+    if (!root) return;
     // Ids are minted per file by the inner extractor, so two script blocks that
     // both define `setup` would collide. Threading one set across the blocks
     // makes the second one `path#setup~2`, and the rename is applied to that
@@ -199,7 +198,7 @@ export function extractContainer(rel: string, source: string, lang: ContainerLan
         rawEdges.push({ ...edge, source: source_, ...(targetId === undefined ? {} : { targetId }) });
       }
     }
-  }
+  });
 
   // Built last so it can carry the residual, but unshifted first so the file node
   // stays at index 0 like every other tier's output.
