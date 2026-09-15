@@ -44,8 +44,8 @@
   },
   "files": {
     "tree-sitter-perl.wasm": {
-      "sha256": "2558dfc793d05e8cecceb4cd21a7fbe4fa3e6e6d14526e2b907fd8ae80e4905b",
-      "bytes": 4807434
+      "sha256": "9354cf67bd82f45d15b6176e759dbe4138923b009e1078f178b4333dd6cf54ea",
+      "bytes": 4807758
     },
     "node-types.json": {
       "sha256": "5f037c3ef3d4a152f96184646b8122f4c6eb9168cdcd2958e08ccd916c7a2cf3",
@@ -66,6 +66,10 @@
     "legacy-foreach-qw.patch": {
       "sha256": "67cb4500dc989c27e2dce22688dc6057d5f47028135a92f585241fdb880f4edb",
       "bytes": 616
+    },
+    "interpolated-subscript-arrow.patch": {
+      "sha256": "6841dd3db02a1924f35d88a554c362b76bd2cdcebb6bf116880db315798bd9df",
+      "bytes": 441
     }
   },
   "patches": [
@@ -86,6 +90,12 @@
       "path": "grammar.js",
       "resultSha256": "1a5e2076ea17ed8317af872c9849899971124f6cfe730adfca9aa25dc23a0fb7",
       "reason": "Parse pre-5.18 foreach loops with explicit scalar iterators and unparenthesized qw lists."
+    },
+    {
+      "file": "interpolated-subscript-arrow.patch",
+      "path": "grammar.js",
+      "resultSha256": "78aee4a78c68374a63539e65a6a79ba3d384cac6c3ebcaa4d87d231315b88fbe",
+      "reason": "Keep method-looking text literal after interpolated array/hash subscripts while preserving dereference chains."
     }
   ]
 }

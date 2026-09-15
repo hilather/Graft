@@ -3,7 +3,7 @@ import { posix } from "node:path";
 import type { Node } from "web-tree-sitter";
 import { contentHash } from "../util/id.js";
 import type { Kind, NodeV1 } from "./types.js";
-import type { PerlBinding, PerlContext, PerlDefinition, PerlDiagnostic, PerlExport, PerlExtractResult, PerlFileFacts, PerlKnown, PerlLoad, PerlPackageRegion, PerlPhase, PerlRange, PerlReceiver, PerlScope } from "./perl-types.js";
+import type { PerlBinding, PerlContext, PerlDefinition, PerlDiagnostic, PerlExport, PerlExtractResult, PerlFileFacts, PerlKnown, PerlLoad, PerlPackageRegion, PerlPhase, PerlRange, PerlReceiver, PerlReference, PerlScope } from "./perl-types.js";
 import { PERL_FACTS_VERSION } from "./perl-types.js";
 import { PERL_FRAMEWORK_DECLARATIONS, PERL_FRAMEWORK_NAMES, readPerlFrameworkDeclaration } from "./perl-frameworks.js";
 import { perlFileExecution } from "./perl-context.js";
@@ -432,12 +432,18 @@ class PerlExtractor {
       if (binding) binding.invalidations.push({ at: node.startIndex, reason: "assignment" });
     } else if (declaration) this.variable(left, ctx);
     if (left.type === "glob") {
-      this.diagnostic("PERL_SYMBOL_TABLE_MUTATION", "Typeglob assignment does not establish a proven callable alias", node);
       const identity = name ? packageNameOf(name.slice(1), ctx.packageName) : null;
+      const ref = right.type === "refgen_expression" ? right.firstNamedChild : null;
+      const refName = ref?.type === "function" ? ref.text.replace(/^&/, "") : null;
+      const aliasReference: PerlReference | undefined = identity && refName && PERL_NAME.test(refName) && !right.hasError
+        && this.source.slice(left.endIndex, right.startIndex).trim() === "="
+        ? { ...this.context(right, ctx), form: "named-coderef", name: known(refName) } : undefined;
+      if (!aliasReference) this.diagnostic("PERL_SYMBOL_TABLE_MUTATION", "Typeglob assignment does not establish a proven callable alias", node);
       const body = right.type === "anonymous_subroutine_expression" && right.namedChildren.length === 1 ? right.firstNamedChild : null;
       const emptyReplacement = body?.type === "block" && body.namedChildren.length === 0 && !right.hasError
         && this.source.slice(left.endIndex, right.startIndex).trim() === "=";
-      this.facts.mutations.push({ ...this.context(node, ctx), names: identity ? known([identity.qualifiedName]) : unknown("computed typeglob"), ...(emptyReplacement ? { emptyReplacement: true as const } : {}) });
+      this.facts.mutations.push({ ...this.context(node, ctx), names: identity ? known([identity.qualifiedName]) : unknown("computed typeglob"), ...(aliasReference ? { aliasReference } : {}), ...(emptyReplacement ? { emptyReplacement: true as const } : {}) });
+      if (aliasReference) { this.facts.references.push(aliasReference); return; }
     }
     this.walk(right, ctx);
   }

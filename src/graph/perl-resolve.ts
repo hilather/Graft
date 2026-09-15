@@ -48,6 +48,8 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
   let initializationMutations: ReturnType<typeof createPerlInitializationMutations> | undefined;
   const hasMutations = [...files.values()].some((facts) => facts.mutations.length);
   const definitions = new Map<string, Map<string, PerlDefinition[]>>();
+  const mutationFiles = new Map([...files].flatMap(([file, facts]) => facts.mutations.map(mutation => [mutation, file] as const)));
+  const aliasNames = new Set([...mutationFiles.keys()].flatMap(mutation => mutation.aliasReference && mutation.names.kind === "known" ? mutation.names.value : []));
   const compileCalls = new WeakMap<PerlFileFacts, number[]>();
   const bindingIndexes = new WeakMap<PerlFileFacts, Map<string, PerlBinding>>();
   const scopeIndexes = new WeakMap<PerlFileFacts, Map<string, PerlScope>>();
@@ -127,6 +129,31 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
     const inferred = state?.excluded.some(affects) ?? false;
     const local = definitions.get(file)?.get(name) ?? [];
     const compiled = inlineSite && local.length === 1 && inlineConstantCandidate(files.get(file)!, local[0], inlineSite, compileCalls);
+    const active = state && aliasNames.has(name) ? [...state.active].filter(affects) : [];
+    const alias = active.length === 1 ? active[0] : undefined;
+    if (!compiled && !result.unknown && site && !captured && alias?.aliasReference) {
+      const aliasFile = mutationFiles.get(alias)!;
+      const timeline = packageOrder.timeline(file, site);
+      const installed = timeline?.ordered ? timeline.aliases.get(alias) : undefined;
+      // The assignment captures a CODE value. Resolve its RHS in the state
+      // before installation, not in the state at a later invocation.
+      if (installed !== undefined && !timeline!.uncertainDefinitions.has(name)
+        && [...reached.keys()].every(owner => (definitions.get(owner)?.get(name) ?? []).every(definition =>
+          timeline!.definitions.has(definition.nodeId) && timeline!.definitions.get(definition.nodeId)! < installed))) {
+        const ref = alias.aliasReference;
+        const binding = liveBinding(files.get(aliasFile)!, ref);
+        if (binding?.target.kind === "known" && "nodeId" in binding.target.value && !binding.invalidations.some(i => i.at <= ref.range.start)) {
+          return { candidates: [{ nodeId: binding.target.value.nodeId, confidence: reached.get(aliasFile) ?? "inferred" }], unknown: false };
+        }
+        if (!ref.bindingId && ref.name.kind === "known") {
+          const target = ref.name.value.includes("::") ? ref.name.value : `${ref.packageName}::${ref.name.value}`;
+          const resolution = packageCandidates(aliasFile, target, reachableAt(aliasFile, ref), nextSeen,
+            ref.phase === "compile" || ref.phase === "BEGIN" ? ref.range.start : undefined, false, ref);
+          return { ...resolution, candidates: resolution.candidates.map(candidate => ({ ...candidate,
+            confidence: weakerPerlConfidence(candidate.confidence, reached.get(aliasFile) ?? "inferred") })) };
+        }
+      }
+    }
     // Activated unknown code can affect any package, including imported slots.
     // The origin file is not a namespace boundary for eval or dynamic globs.
     if (state && !compiled && [...state.active].some(affects)) result.unknown = true;
