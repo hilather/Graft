@@ -37,6 +37,6 @@ Real build scenarios use a frozen copy of Graft's sources and multilingual fixtu
 
 The legacy raw counter name `projectionFilesReplaced` counts observed mtime/inode changes, including in-place rewrites; it does not imply every baseline write replaced an inode.
 
-Raw per-run JSON records include child CPU, process wall time, peak RSS, I/O counters, and output digests. Samples alternate variant order and run sequentially. Short extraction/query cases perform five warmups per child. Sample counts are shown in the table; no tail-latency estimate is inferred from these runs.
+The committed [summary](summary.json) retains aggregate timings, CPU, peak RSS, I/O counters and parity outcomes. Individual run files are generated benchmark artifacts and are not kept in the current tree. Samples alternate variant order and run sequentially. Short extraction/query cases perform five warmups per child. Sample counts are shown in the table; no tail-latency estimate is inferred from these runs.
 The initial unchanged-build scenario runs immediately after cold parsing in the same process and inherits its heap/GC state. This is distinct from a fresh CLI process using an existing disk cache; see the follow-up experiment before drawing a CLI-build conclusion.
 These results establish workload-specific effects on this machine. They do not establish an overall product speedup, a Windows result, browser performance, or all-language worker safety.

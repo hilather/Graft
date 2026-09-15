@@ -1,0 +1,20 @@
+# Benchmark runs produce local artifacts. Commit only curated summaries,
+# reproducibility manifests and performance reports.
+*
+!.gitignore
+!initial/
+!followup/
+!wasm-soak/
+!interval-scaling.json
+!queue.json
+initial/*
+!initial/REPORT.md
+!initial/manifest.json
+!initial/summary.json
+followup/*
+!followup/REPORT.md
+!followup/manifest.json
+!followup/summary.json
+wasm-soak/*
+!wasm-soak/manifest.json
+!wasm-soak/summary.json

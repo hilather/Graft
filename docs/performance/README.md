@@ -24,7 +24,7 @@ artifact; reproduce it from the SHA above, then build it with the pinned lockfil
 ## Evaluation and benefit ledger
 
 Status below distinguishes implemented portions from remaining proposals.
-Raw initial results and exact parity checks are in
+Initial aggregate results and exact parity outcomes are in
 [the initial report](evidence/initial/REPORT.md). The completed initial batch
 covers P02, P04, P06 and P13 below; the remaining program is staged follow-up
 work. Expected benefits below are not claimed speedups.
@@ -62,7 +62,7 @@ work. Expected benefits below are not claimed speedups.
 | P13 queue with concurrency 2 | Peak active jobs 4 → 2; same-key overlaps 2 → 0 | Correctness fix demonstrated by the separate queue probes; a superseded pending job no longer runs. |
 
 The initial Rust whole-extraction median was 5.1% slower, and the initial
-unchanged real-build median was 24.6% slower. Both remain visible in the raw
+unchanged real-build median was 24.6% slower. Both remain visible in the initial
 report. The latter measured a warm build immediately after cold parsing in the
 same process, so it inherited that parse's heap/GC state. The [follow-up](evidence/followup/REPORT.md)
 used separate cache-setup processes and 20 fresh-process samples: build latency
@@ -88,8 +88,9 @@ speedup is claimed.
 The initial and follow-up latency reports measure the interval change before
 WASM cleanup. The later [WASM soak](evidence/wasm-soak/summary.json) measures the
 final extractor with cleanup. It performs 600 parses of 100 definitions and 200
-calls, samples memory every 100 parses after explicit JavaScript GC, and retains
-all samples plus code/lockfile digests. Reference external memory grew by a median
+calls and samples memory every 100 parses after explicit JavaScript GC. The
+committed summary and manifest retain aggregate results and code/lockfile
+digests. Reference external memory grew by a median
 104.79 MiB; candidate external memory stayed flat (−1.20 MiB from initial load).
 JavaScript GC alone does not free these WASM allocations. Its elapsed timings
 include memory sampling and forced GC and are diagnostic, not a CLI speed claim.
@@ -111,8 +112,16 @@ report predates that correction and retains its original same-process setup.
 CPU is measured inside the worker, not the
 launcher. Peak RSS includes setup and warmup, excludes descendant processes
 (including Perl's parser worker), and is labelled accordingly. OS page
-cache state is uncontrolled. Raw results, source manifests and compiled-code
-digests remain available for review.
+cache state is uncontrolled.
+
+The repository keeps performance reports and eight compact JSON files: summaries
+and reproducibility manifests for the initial, follow-up and WASM runs, plus
+the [interval comparison](evidence/interval-scaling.json) and
+[queue comparison](evidence/queue.json). Individual run records, CPU profiles
+and copied harness snapshots are generated artifacts and are ignored. Manifests
+retain corpus hashes and counts without repeating per-file inventories. Run the
+benchmark harness to collect new raw data; the original recordings remain in
+commit `0605e5c` if a historical investigation needs them.
 
 This initial harness does not yet cover every W0/W5 requirement: CLI import
 traces, fine-grained build phases, first/warm MCP protocol measurements, all edit
