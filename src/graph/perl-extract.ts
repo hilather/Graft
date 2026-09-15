@@ -27,8 +27,8 @@ export function perlRange(node: Node): PerlRange {
   return { start: node.startIndex, end: node.endIndex, startLine: node.startPosition.row + 1, endLine: node.endPosition.row + 1 };
 }
 
-export function extractPerlTree(file: string, source: string, root: Node): PerlExtractResult {
-  return new PerlExtractor(file, source).extract(root);
+export function extractPerlTree(file: string, source: string, root: Node, parseEmbedded?: (replacement: Node) => Node | null): PerlExtractResult {
+  return new PerlExtractor(file, source, parseEmbedded).extract(root);
 }
 
 interface WalkContext {
@@ -62,7 +62,7 @@ class PerlExtractor {
   private opaqueRecoveryStart = Infinity;
   private hasParseErrors = false;
 
-  constructor(private readonly file: string, private readonly source: string) {
+  constructor(private readonly file: string, private readonly source: string, private readonly parseEmbedded?: (replacement: Node) => Node | null) {
     this.result = perlFileResult(file, source);
     this.facts = this.result.languageData;
     this.minted.add(file);
@@ -201,6 +201,7 @@ class PerlExtractor {
       return;
     }
     if (OPAQUE_PERL.has(type) || type === "__DATA__" || type === "__END__") {
+      if (type === "substitution_regexp" && this.substitution(node, ctx)) return;
       if (hasEmbeddedCode(node)) this.diagnostic("PERL_EMBEDDED_CODE_UNSUPPORTED", "Executable interpolation or regex code is not traversed", node);
       return;
     }
@@ -276,6 +277,22 @@ class PerlExtractor {
     }
     const nested = CONDITIONAL.has(type) ? { ...ctx, conditional: true } : ctx;
     this.sequence(node.namedChildren, nested);
+  }
+
+  private substitution(node: Node, ctx: WalkContext): boolean {
+    // /e is compiled source; /ee performs an additional runtime string eval.
+    const modifiers = node.childForFieldName("modifiers")?.text ?? "";
+    if ([...modifiers].filter(flag => flag === "e").length !== 1) return false;
+    const pattern = node.childForFieldName("content");
+    if (pattern && (hasEmbeddedCode(pattern) || /(?:^|[^\\])(?:\\\\)*\(\?\??\{/.test(pattern.text))) return false;
+    const replacement = node.namedChildren.find(child => child.type === "replacement");
+    const block = replacement && this.parseEmbedded?.(replacement);
+    if (!block) return false;
+    // The expression runs only after a match, possibly repeatedly with /g.
+    // Its implicit block confines lexicals while retaining the enclosing
+    // routine's package, arguments, phase, and graph owner.
+    this.walk(block, { ...ctx, conditional: true });
+    return true;
   }
 
   private declaration(node: Node, ctx: WalkContext): void {
