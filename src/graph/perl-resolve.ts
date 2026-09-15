@@ -25,12 +25,19 @@ function inlineConstantCandidate(facts: PerlFileFacts, definition: PerlDefinitio
   if (!definition.inlineConstant || !definition.hasBody || definition.conditional
     || site.syntax === "ampersand" || !(site.syntax === "bareword" || site.emptyArguments)
     || definition.range.end > site.range.start) return false;
+  if (facts.diagnostics.some(diagnostic => ["PERL_PARSE_ERROR", "PERL_OPAQUE_RECOVERY", "PERL_EMBEDDED_CODE_UNSUPPORTED"].includes(diagnostic.code))) return false;
+  if (facts.mutations.some(mutation => {
+    if (mutation.names.kind === "known" && !mutation.names.value.includes(definition.qualifiedName)) return false;
+    const at = compileEffectPosition(facts, mutation);
+    return at !== undefined && at > definition.range.end && at <= site.range.start;
+  })) return false;
   let positions = compileCalls.get(facts);
   if (!positions) {
-    positions = facts.calls.map((call) => compileEffectPosition(facts, call)).filter((at): at is number => at !== undefined).sort((a, b) => a - b);
+    positions = [...facts.calls, ...facts.loads.filter(load => load.targetKind !== "pragma" && load.targetKind !== "version")]
+      .map(context => compileEffectPosition(facts, context)).filter((at): at is number => at !== undefined).sort((a, b) => a - b);
     compileCalls.set(facts, positions);
   }
-  // A BEGIN/helper or computed initializer can replace a constant or its
+  // A BEGIN/helper, module initializer, or import can replace a constant or its
   // prototype before this call is compiled. No purity is assumed. Locate the
   // first such effect after the declaration without rescanning every call.
   let low = 0, high = positions.length;
@@ -137,6 +144,10 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
     const inferred = state?.excluded.some(affects) ?? false;
     const local = definitions.get(file)?.get(name) ?? [];
     const compiled = inlineSite && local.length === 1 && inlineConstantCandidate(files.get(file)!, local[0], inlineSite, compileCalls);
+    // This expression contains the value compiled from the local definition.
+    // Later foreign initializers, imports, or reopened declarations can change
+    // the callable slot, but cannot retarget an already embedded value.
+    if (compiled && byId.has(local[0].nodeId)) return { candidates: [{ nodeId: local[0].nodeId, confidence: reached.get(file) ?? "extracted" }], unknown: false };
     const active = state && aliasNames.has(name) ? [...state.active].filter(affects) : [];
     const alias = active.length === 1 ? active[0] : undefined;
     if (!compiled && !result.unknown && site && !captured && alias && (alias.aliasReference || alias.replacementNodeId)) {
@@ -174,18 +185,7 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
       const facts = files.get(contextFile);
       if (!facts) continue;
       const own = definitions.get(contextFile)?.get(name) ?? [];
-      const inline = contextFile === file && own.length === 1 && inlineSite && inlineConstantCandidate(facts, own[0], inlineSite, compileCalls);
-      if (facts.mutations.some((m) => {
-        if (!affects(m)) return false;
-        if (!inline) {
-          return m.mechanism === "framework" || !state || state.active.has(m);
-        }
-        // Same-unit literal constants are already compiled into ordinary
-        // zero-argument calls. Runtime changes and later BEGIN effects cannot
-        // replace those values; ampersand/coderef/method calls stay dynamic.
-        const at = compileEffectPosition(facts, m);
-        return at !== undefined && at > own[0].range.end && at <= inlineSite!.range.start;
-      })) result.unknown = true;
+      if (facts.mutations.some(m => affects(m) && (m.mechanism === "framework" || !state || state.active.has(m)))) result.unknown = true;
       // use/no execute while compiling. A later unique source declaration
       // replaces their earlier package binding. Keep runtime mutations above
       // and imports after/inside that declaration conservative.
@@ -197,7 +197,7 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
       };
       for (const definition of own) {
         if (!definition.hasBody || definition.conditional || !byId.has(definition.nodeId) || (contextFile === file && earlyPosition !== undefined && definition.range.end > earlyPosition)) result.unknown = true;
-        else result.candidates.push({ nodeId: definition.nodeId, confidence: inferred && !inline ? "inferred" : confidence });
+        else result.candidates.push({ nodeId: definition.nodeId, confidence: inferred ? "inferred" : confidence });
       }
       const importKey = perlImportKey(contextFile, packageName, bare);
       for (const key of [importKey, perlImportKey(contextFile, packageName)]) if (environment.unknownImports.has(key)) {
