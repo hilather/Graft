@@ -1,0 +1,11 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -1355,7 +1355,7 @@
+       seq('@', choice(/[^A-Za-z0-9_\$'+:-]/, $._quotelike_end_zw, $._quotelike_end)),
+       // handling space sensitivity more correctly re deref-ing interps
+       seq(
+-        $.scalar,
++        choice($.scalar, $._subscripted_interpolations),
+         alias(token.immediate('->'), 'not-interpolated'),
+         choice(
+           // handle "$ting->@ {blah}" and "$ting-> {blah}"

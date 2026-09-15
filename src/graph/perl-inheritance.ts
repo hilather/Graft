@@ -15,10 +15,13 @@ export interface PerlClassState {
   target: PerlClassTarget;
   parents: string[];
   mro: "dfs" | "c3";
+  /** Internal prefix reads stop before these unresolved parent alternatives. */
+  incomplete?: string;
 }
 export interface PerlInheritanceResolver {
   state(packageName: string, reachable: ReadonlyMap<string, Confidence>, site?: { file: string; context: PerlContext }): PerlKnown<PerlClassState>;
   linearize(packageName: string, reachable: ReadonlyMap<string, Confidence>, site?: { file: string; context: PerlContext }): PerlKnown<PerlClassTarget[]>;
+  linearizePrefix(packageName: string, reachable: ReadonlyMap<string, Confidence>, site?: { file: string; context: PerlContext }): PerlClassTarget[];
 }
 
 function order(facts: PerlFileFacts, fact: PerlInheritance): number {
@@ -30,9 +33,10 @@ function order(facts: PerlFileFacts, fact: PerlInheritance): number {
 export function createPerlInheritanceResolver(files: ReadonlyMap<string, PerlFileFacts>, environment: PerlModuleEnvironment, packageOrder = createPerlPackageOrder(files, environment)): PerlInheritanceResolver {
   const stateCache = new Map<string, PerlKnown<PerlClassState>>();
   const linearCache = new Map<string, PerlKnown<PerlClassTarget[]>>();
+  const prefixCache = new Map<string, PerlClassTarget[]>();
   const keyOf = (name: string, reachable: ReadonlyMap<string, Confidence>, site?: { file: string; context: PerlContext }) => `${name}\0${[...reachable].sort(([a], [b]) => a.localeCompare(b)).map(([f, c]) => `${f}:${c}`).join("\0")}\0${site && (site.context.phase === "compile" || site.context.phase === "BEGIN" || site.context.sourceNode === site.file) ? `${site.file}:${site.context.phase}:${site.context.range.start}` : "runtime"}`;
-  const state: PerlInheritanceResolver["state"] = (name, reachable, site) => {
-    const key = keyOf(name, reachable, site);
+  const readState = (name: string, reachable: ReadonlyMap<string, Confidence>, site?: { file: string; context: PerlContext }, prefix = false): PerlKnown<PerlClassState> => {
+    const key = `${keyOf(name, reachable, site)}\0${prefix}`;
     const cached = stateCache.get(key);
     if (cached) return cached;
     const compute = (): PerlKnown<PerlClassState> => {
@@ -54,6 +58,7 @@ export function createPerlInheritanceResolver(files: ReadonlyMap<string, PerlFil
       const file = events.find(event => candidates.includes(event.file))?.file ?? candidates[0];
       const facts = files.get(file)!, region = facts.packages.find((p) => p.name === name);
       let parents: string[] = [], mro: "dfs" | "c3" = "dfs";
+      let incomplete: string | undefined;
       let confidence = candidates.reduce<Confidence>((value, candidate) => weakerPerlConfidence(value, reachable.get(candidate)!), reachable.get(file)!);
       for (const event of events) {
         const fact = event.fact;
@@ -62,7 +67,20 @@ export function createPerlInheritanceResolver(files: ReadonlyMap<string, PerlFil
           if (early && (fact.phase !== "compile" && fact.phase !== "BEGIN" || order(event.facts, fact) > site.context.range.start)) continue;
           if (!early && site.context.sourceNode === site.file && fact.phase !== "compile" && fact.phase !== "BEGIN" && fact.range.end > site.context.range.start) continue;
         }
-        if (fact.unknownMutation || fact.conditional || fact.parents.kind === "unknown") return unknown(`Unknown hierarchy mutation for ${name}`);
+        if (fact.unknownMutation || fact.conditional) return unknown(`Unknown hierarchy mutation for ${name}`);
+        if (fact.parents.kind === "unknown") {
+          if (!prefix || fact.operation !== "append" || !fact.parentAlternatives?.length) return unknown(`Unknown hierarchy mutation for ${name}`);
+          // Appending an unknown suffix leaves the existing prefix in place.
+          // Never append the alternatives as though every parent is present.
+          const common: string[] = [];
+          for (const [index, parent] of fact.parentAlternatives[0].entries()) {
+            if (!fact.parentAlternatives.every(choice => choice[index] === parent)) break;
+            common.push(parent);
+          }
+          if (!incomplete) parents = [...new Set([...parents, ...common])];
+          incomplete = `Alternative parents for ${name}`;
+          continue;
+        }
         if (fact.adapterLoadId && environment.loads.has(fact.adapterLoadId)) return unknown(`Local module shadows the ${fact.mechanism} adapter`);
         if (fact.mechanism === "mro") {
           if (fact.mro === "unknown") return unknown(`Unknown MRO for ${name}`);
@@ -75,12 +93,14 @@ export function createPerlInheritanceResolver(files: ReadonlyMap<string, PerlFil
           if (!localBase) return unknown(`A required parent module for ${name} was not resolved`);
         }
         for (const id of fact.loadIds ?? []) if (environment.loads.has(id)) confidence = weakerPerlConfidence(confidence, environment.loads.get(id)!.confidence);
-        parents = [...new Set([...(fact.operation === "append" ? parents : []), ...fact.parents.value])];
+        if (fact.operation === "replace") { parents = [...new Set(fact.parents.value)]; incomplete = undefined; }
+        else if (!incomplete) parents = [...new Set([...parents, ...fact.parents.value])];
       }
-      return known({ target: { packageName: name, file, ...(region ? { nodeId: region.nodeId } : {}), confidence }, parents, mro });
+      return known({ target: { packageName: name, file, ...(region ? { nodeId: region.nodeId } : {}), confidence }, parents, mro, ...(incomplete ? { incomplete } : {}) });
     };
     const result = compute(); stateCache.set(key, result); return result;
   };
+  const state: PerlInheritanceResolver["state"] = (name, reachable, site) => readState(name, reachable, site);
   const linearize: PerlInheritanceResolver["linearize"] = (name, reachable, site) => {
     const key = keyOf(name, reachable, site);
     const cached = linearCache.get(key);
@@ -123,5 +143,29 @@ export function createPerlInheritanceResolver(files: ReadonlyMap<string, PerlFil
     };
     const result = visit(name); linearCache.set(key, result); return result;
   };
-  return { state, linearize };
+  const linearizePrefix: PerlInheritanceResolver["linearizePrefix"] = (name, reachable, site) => {
+    const key = keyOf(name, reachable, site), cached = prefixCache.get(key);
+    if (cached) return cached;
+    const root = readState(name, reachable, site, true);
+    // A C3 order depends on the complete graph. DFS can stop exactly where
+    // the first unavailable ancestor would be searched.
+    if (root.kind === "unknown" || root.value.mro !== "dfs") return [];
+    const result: PerlClassTarget[] = [], seen = new Set<string>();
+    let confidence: Confidence = "extracted";
+    const visit = (current: string, depth: number): boolean => {
+      if (depth >= 256) return false;
+      if (seen.has(current)) return true;
+      const info = readState(current, reachable, site, true);
+      if (info.kind === "unknown") return false;
+      seen.add(current);
+      confidence = weakerPerlConfidence(confidence, info.value.target.confidence);
+      result.push({ ...info.value.target, confidence });
+      for (const parent of info.value.parents) if (!visit(parent, depth + 1)) return false;
+      return !info.value.incomplete;
+    };
+    visit(name, 0);
+    prefixCache.set(key, result);
+    return result;
+  };
+  return { state, linearize, linearizePrefix };
 }

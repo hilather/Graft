@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { Parser, Language } from "web-tree-sitter";
 import { extractPerlTree, perlFileResult } from "./perl-extract.js";
+import { createPerlEmbeddedParser } from "./perl-embedded.js";
 import type { PerlParseJob, PerlWorkerMessage } from "./perl-types.js";
 
 if (!parentPort) throw new Error("The Perl worker must run in worker_threads");
@@ -23,6 +24,7 @@ try {
   port.on("message", (job: PerlParseJob) => {
     let parser: Parser | undefined;
     let tree: ReturnType<Parser["parse"]> = null;
+    const embedded = createPerlEmbeddedParser(language, job.source);
     try {
       parser = new Parser();
       parser.setLanguage(language);
@@ -32,10 +34,11 @@ try {
       // Tree-sitter requests further chunks as needed, including for node.text.
       tree = parser.parse((index) => job.source.slice(index, index + 64));
       if (!tree) throw new Error("Perl parser did not return a tree");
-      send({ type: "result", id: job.id, result: extractPerlTree(job.file, job.source, tree.rootNode) });
+      send({ type: "result", id: job.id, result: extractPerlTree(job.file, job.source, tree.rootNode, embedded.parse) });
     } catch (error) {
       send({ type: "result", id: job.id, result: perlFileResult(job.file, job.source, [{ code: "PERL_PARSE_FAILED", file: job.file, severity: "error", message: (error as Error).message }], "failed", false) });
     } finally {
+      embedded.dispose();
       tree?.delete();
       parser?.delete();
     }

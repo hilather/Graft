@@ -7,6 +7,7 @@ import { createPerlInheritanceResolver } from "./perl-inheritance.js";
 import { createPerlPackageOrder } from "./perl-package-order.js";
 import { perlExecutionScope, perlFileExecution } from "./perl-context.js";
 import { createPerlInitializationMutations, type PerlMutationState } from "./perl-mutations.js";
+import { createPerlCaptureContext } from "./perl-capture-context.js";
 
 type Confidence = PerlModuleTarget["confidence"];
 interface Candidate { nodeId: string; confidence: Confidence }
@@ -24,12 +25,19 @@ function inlineConstantCandidate(facts: PerlFileFacts, definition: PerlDefinitio
   if (!definition.inlineConstant || !definition.hasBody || definition.conditional
     || site.syntax === "ampersand" || !(site.syntax === "bareword" || site.emptyArguments)
     || definition.range.end > site.range.start) return false;
+  if (facts.diagnostics.some(diagnostic => ["PERL_PARSE_ERROR", "PERL_OPAQUE_RECOVERY", "PERL_EMBEDDED_CODE_UNSUPPORTED"].includes(diagnostic.code))) return false;
+  if (facts.mutations.some(mutation => {
+    if (mutation.names.kind === "known" && !mutation.names.value.includes(definition.qualifiedName)) return false;
+    const at = compileEffectPosition(facts, mutation);
+    return at !== undefined && at > definition.range.end && at <= site.range.start;
+  })) return false;
   let positions = compileCalls.get(facts);
   if (!positions) {
-    positions = facts.calls.map((call) => compileEffectPosition(facts, call)).filter((at): at is number => at !== undefined).sort((a, b) => a - b);
+    positions = [...facts.calls, ...facts.loads.filter(load => load.targetKind !== "pragma" && load.targetKind !== "version")]
+      .map(context => compileEffectPosition(facts, context)).filter((at): at is number => at !== undefined).sort((a, b) => a - b);
     compileCalls.set(facts, positions);
   }
-  // A BEGIN/helper or computed initializer can replace a constant or its
+  // A BEGIN/helper, module initializer, or import can replace a constant or its
   // prototype before this call is compiled. No purity is assumed. Locate the
   // first such effect after the declaration without rescanning every call.
   let low = 0, high = positions.length;
@@ -46,8 +54,12 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
   const packageOrder = createPerlPackageOrder(files, environment);
   const inheritance = createPerlInheritanceResolver(files, environment, packageOrder);
   let initializationMutations: ReturnType<typeof createPerlInitializationMutations> | undefined;
+  const capturedInLoader = createPerlCaptureContext(files, environment, packageOrder,
+    () => initializationMutations ??= createPerlInitializationMutations(files, environment));
   const hasMutations = [...files.values()].some((facts) => facts.mutations.length);
   const definitions = new Map<string, Map<string, PerlDefinition[]>>();
+  const mutationFiles = new Map([...files].flatMap(([file, facts]) => facts.mutations.map(mutation => [mutation, file] as const)));
+  const aliasNames = new Set([...mutationFiles.keys()].flatMap(mutation => (mutation.aliasReference || mutation.replacementNodeId) && mutation.names.kind === "known" ? mutation.names.value : []));
   const compileCalls = new WeakMap<PerlFileFacts, number[]>();
   const bindingIndexes = new WeakMap<PerlFileFacts, Map<string, PerlBinding>>();
   const scopeIndexes = new WeakMap<PerlFileFacts, Map<string, PerlScope>>();
@@ -116,6 +128,11 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
   const packageCandidates = (file: string, name: string, reached: ReadonlyMap<string, Confidence>, seen = new Set<string>(), earlyPosition?: number, ignoreFrameworkMutations = false, site?: PerlContext, captured?: PerlMutationState): Resolution => {
     const key = `${file}\0${name}`;
     if (seen.has(key)) return { candidates: [], unknown: true };
+    if (!captured && site && "form" in site && site.form === "named-coderef") {
+      const target = capturedInLoader(file, site, name);
+      if (target !== undefined) return target && byId.has(target)
+        ? { candidates: [{ nodeId: target, confidence: "inferred" }], unknown: false } : { candidates: [], unknown: true };
+    }
     const nextSeen = new Set(seen).add(key);
     const split = name.lastIndexOf("::");
     const packageName = name.slice(0, split), bare = name.slice(split + 2);
@@ -127,6 +144,40 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
     const inferred = state?.excluded.some(affects) ?? false;
     const local = definitions.get(file)?.get(name) ?? [];
     const compiled = inlineSite && local.length === 1 && inlineConstantCandidate(files.get(file)!, local[0], inlineSite, compileCalls);
+    // This expression contains the value compiled from the local definition.
+    // Later foreign initializers, imports, or reopened declarations can change
+    // the callable slot, but cannot retarget an already embedded value.
+    if (compiled && byId.has(local[0].nodeId)) return { candidates: [{ nodeId: local[0].nodeId, confidence: reached.get(file) ?? "extracted" }], unknown: false };
+    const active = state && aliasNames.has(name) ? [...state.active].filter(affects) : [];
+    const alias = active.length === 1 ? active[0] : undefined;
+    if (!compiled && !result.unknown && site && !captured && alias && (alias.aliasReference || alias.replacementNodeId)) {
+      const aliasFile = mutationFiles.get(alias)!;
+      const timeline = packageOrder.timeline(file, site);
+      const installed = timeline?.ordered ? timeline.aliases.get(alias) : undefined;
+      // The assignment captures a CODE value. Resolve its RHS in the state
+      // before installation, not in the state at a later invocation.
+      if (installed !== undefined && !timeline!.uncertainDefinitions.has(name)
+        && [...reached.keys()].every(owner => (definitions.get(owner)?.get(name) ?? []).every(definition =>
+          timeline!.definitions.has(definition.nodeId) && timeline!.definitions.get(definition.nodeId)! < installed))) {
+        if (alias.replacementNodeId && byId.has(alias.replacementNodeId)) {
+          return { candidates: [{ nodeId: alias.replacementNodeId, confidence: reached.get(aliasFile) ?? "inferred" }], unknown: false };
+        }
+        const ref = alias.aliasReference!;
+        const binding = liveBinding(files.get(aliasFile)!, ref);
+        if (binding) {
+          const resolution = bindingCandidates(aliasFile, ref, binding, nextSeen);
+          return { ...resolution, candidates: resolution.candidates.map(candidate => ({ ...candidate,
+            confidence: weakerPerlConfidence(candidate.confidence, reached.get(aliasFile) ?? "inferred") })) };
+        }
+        if (!ref.bindingId && ref.name.kind === "known") {
+          const target = ref.name.value.includes("::") ? ref.name.value : `${ref.packageName}::${ref.name.value}`;
+          const resolution = packageCandidates(aliasFile, target, reachableAt(aliasFile, ref), nextSeen,
+            ref.phase === "compile" || ref.phase === "BEGIN" ? ref.range.start : undefined, false, ref);
+          return { ...resolution, candidates: resolution.candidates.map(candidate => ({ ...candidate,
+            confidence: weakerPerlConfidence(candidate.confidence, reached.get(aliasFile) ?? "inferred") })) };
+        }
+      }
+    }
     // Activated unknown code can affect any package, including imported slots.
     // The origin file is not a namespace boundary for eval or dynamic globs.
     if (state && !compiled && [...state.active].some(affects)) result.unknown = true;
@@ -134,18 +185,7 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
       const facts = files.get(contextFile);
       if (!facts) continue;
       const own = definitions.get(contextFile)?.get(name) ?? [];
-      const inline = contextFile === file && own.length === 1 && inlineSite && inlineConstantCandidate(facts, own[0], inlineSite, compileCalls);
-      if (facts.mutations.some((m) => {
-        if (!affects(m)) return false;
-        if (!inline) {
-          return m.mechanism === "framework" || !state || state.active.has(m);
-        }
-        // Same-unit literal constants are already compiled into ordinary
-        // zero-argument calls. Runtime changes and later BEGIN effects cannot
-        // replace those values; ampersand/coderef/method calls stay dynamic.
-        const at = compileEffectPosition(facts, m);
-        return at !== undefined && at > own[0].range.end && at <= inlineSite!.range.start;
-      })) result.unknown = true;
+      if (facts.mutations.some(m => affects(m) && (m.mechanism === "framework" || !state || state.active.has(m)))) result.unknown = true;
       // use/no execute while compiling. A later unique source declaration
       // replaces their earlier package binding. Keep runtime mutations above
       // and imports after/inside that declaration conservative.
@@ -157,7 +197,7 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
       };
       for (const definition of own) {
         if (!definition.hasBody || definition.conditional || !byId.has(definition.nodeId) || (contextFile === file && earlyPosition !== undefined && definition.range.end > earlyPosition)) result.unknown = true;
-        else result.candidates.push({ nodeId: definition.nodeId, confidence: inferred && !inline ? "inferred" : confidence });
+        else result.candidates.push({ nodeId: definition.nodeId, confidence: inferred ? "inferred" : confidence });
       }
       const importKey = perlImportKey(contextFile, packageName, bare);
       for (const key of [importKey, perlImportKey(contextFile, packageName)]) if (environment.unknownImports.has(key)) {
@@ -210,6 +250,53 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
     }
     return undefined;
   };
+  const bindingCandidates = (file: string, site: PerlCall | PerlReference, binding: PerlBinding, seen = new Set<string>()): Resolution => {
+    const unresolved: Resolution = { candidates: [], unknown: true };
+    const key = `${file}\0binding:${binding.id}`;
+    if (seen.has(key)) return unresolved;
+    const facts = files.get(file)!;
+    const sameExecution = perlExecutionScope(facts, binding.scopeId) === perlExecutionScope(facts, site.scopeId);
+    // A closure may run after assignments textually below its definition.
+    // Capturing a CODE value freezes its identity, not the captured variable.
+    if (binding.invalidations.some(invalidation => !sameExecution || invalidation.at <= site.range.start)) return unresolved;
+    const capture = binding.captureReference;
+    if (!capture) {
+      if (binding.target.kind !== "known" || !("nodeId" in binding.target.value)) return unresolved;
+      if (binding.kind === "our-alias" && !binding.name.startsWith("$")) return packageCandidates(file,
+        `${binding.packageName}::${binding.name}`, reachableAt(file, site), seen,
+        site.phase === "compile" || site.phase === "BEGIN" ? site.range.start : undefined, false, site);
+      return { candidates: [{ nodeId: binding.target.value.nodeId, confidence: "extracted" }], unknown: false };
+    }
+    if (capture.conditional || facts.initializationOrderUnknown || capture.range.end > site.range.start) return unresolved;
+    let initialized = sameExecution && capture.phase === site.phase;
+    if (!initialized && capture.phase === "runtime" && site.phase === "runtime") {
+      // An anonymous routine created after initialization cannot be invoked
+      // before its captured value exists. Named subs compile earlier and need
+      // the stronger whole-initialization ordering proof below.
+      const scopes = scopeIndexes.get(facts)!;
+      let scope = scopes.get(perlExecutionScope(facts, site.scopeId));
+      while (scope?.kind === "callback" && scope.contextKnown && scope.parent) {
+        const parent = perlExecutionScope(facts, scope.parent);
+        if (parent === perlExecutionScope(facts, capture.scopeId)) {
+          initialized = scope.range.start >= capture.range.end;
+          break;
+        }
+        scope = scopes.get(parent);
+      }
+      if (!initialized && perlFileExecution(facts, capture.scopeId)) {
+        const timeline = packageOrder.timeline(file, site);
+        initialized = !!timeline?.ordered && timeline.captures.has(binding);
+      }
+    }
+    if (!initialized) return unresolved;
+    const next = new Set(seen).add(key);
+    const capturedBinding = liveBinding(facts, capture);
+    if (capturedBinding) return bindingCandidates(file, capture, capturedBinding, next);
+    if (capture.bindingId || capture.name.kind !== "known") return unresolved;
+    const target = capture.name.value.includes("::") ? capture.name.value : `${capture.packageName}::${capture.name.value}`;
+    return packageCandidates(file, target, reachableAt(file, capture), next,
+      capture.phase === "compile" || capture.phase === "BEGIN" ? capture.range.start : undefined, false, capture);
+  };
   const priorBareword = (file: string, site: PerlCall, qualified: string, reached: ReadonlyMap<string, Confidence>): boolean => {
     const split = qualified.lastIndexOf("::"), pkg = qualified.slice(0, split), name = qualified.slice(split + 2);
     for (const contextFile of reached.keys()) {
@@ -228,14 +315,16 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
     if (own.candidates.length || own.unknown) return own;
     if (!superCall && roleComposition(packageName, reached)) return { candidates: [], unknown: true };
     const order = inheritance.linearize(packageName, reached, { file, context: site });
-    if (order.kind === "unknown") {
-      report(file, site, "PERL_MRO_UNRESOLVED", order.reason);
-      return { candidates: [], unknown: true };
-    }
-    for (const target of order.value.slice(1)) {
+    const targets = order.kind === "known" ? order.value : /Cyclic|Inconsistent|depth bound/.test(order.reason) ? []
+      : inheritance.linearizePrefix(packageName, reached, { file, context: site });
+    for (const target of targets.slice(1)) {
       const inherited = packageCandidates(file, `${target.packageName}::${method}`, reached, undefined, early, modifier, site);
       if (inherited.candidates.length || inherited.unknown) return { unknown: inherited.unknown, candidates: inherited.candidates.map((candidate) => ({ ...candidate, confidence: weakerPerlConfidence(candidate.confidence, target.confidence) })) };
       if (roleComposition(target.packageName, reached)) return { candidates: [], unknown: true };
+    }
+    if (order.kind === "unknown") {
+      report(file, site, "PERL_MRO_UNRESOLVED", order.reason);
+      return { candidates: [], unknown: true };
     }
     return { candidates: [], unknown: false };
   };
@@ -298,9 +387,7 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
       } else if (site.form === "modifier") {
         result = methodCandidates(file, site, site.packageName, rawName, reached, false, true);
       } else if (site.bindingId || site.form === "coderef") {
-        if (!binding || binding.target.kind !== "known" || !("nodeId" in binding.target.value) || binding.invalidations.some((i) => i.at <= site.range.start)) result = { candidates: [], unknown: true };
-        else if (binding.kind === "our-alias" && !binding.name.startsWith("$")) result = packageCandidates(file, `${binding.packageName}::${binding.name}`, reached, undefined, earlyPosition, false, site);
-        else result = { candidates: [{ nodeId: binding.target.value.nodeId, confidence: "extracted" }], unknown: false };
+        result = binding ? bindingCandidates(file, site, binding) : { candidates: [], unknown: true };
       } else if (site.form === "method") {
         let receiver = site.receiver;
         if (receiver?.kind === "lexical") {

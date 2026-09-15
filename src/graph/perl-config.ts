@@ -12,6 +12,8 @@ export interface PerlProject {
   root: string;
   analysisCwd?: string;
   includeRoots: string[];
+  /** Explicit runtime absolute prefixes mapped into the visible source tree. */
+  pathMappings?: Record<string, string>;
   confidence: "extracted" | "inferred";
   markers: string[];
 }
@@ -93,7 +95,7 @@ export function parsePerlConfig(text: string | null, visibleFiles: readonly stri
       value.projects.forEach((input, index) => {
         const where = `projects[${index}]`;
         const p = object(input, where);
-        keys(p, ["root", "analysisCwd", "includeRoots"], where);
+        keys(p, ["root", "analysisCwd", "includeRoots", "pathMappings"], where);
         const root = relativePath(p.root, `${where}.root`);
         if (seen.has(root)) throw new PerlConfigError(`duplicate project root ${JSON.stringify(root || ".")}`);
         seen.add(root);
@@ -101,7 +103,17 @@ export function parsePerlConfig(text: string | null, visibleFiles: readonly stri
         const includeRoots = p.includeRoots.map((r, i) => relativePath(r, `${where}.includeRoots[${i}]`));
         if (new Set(includeRoots).size !== includeRoots.length) throw new PerlConfigError(`${where}.includeRoots contains duplicates`);
         const analysisCwd = p.analysisCwd === undefined ? undefined : relativePath(p.analysisCwd, `${where}.analysisCwd`);
-        projects.set(root, { root, includeRoots, ...(analysisCwd === undefined ? {} : { analysisCwd }), confidence: "extracted", markers: projects.get(root)?.markers ?? [] });
+        let pathMappings: Record<string, string> | undefined;
+        if (p.pathMappings !== undefined) {
+          pathMappings = Object.create(null) as Record<string, string>;
+          for (const [runtime, source] of Object.entries(object(p.pathMappings, `${where}.pathMappings`))) {
+            if (!runtime.startsWith("/") || runtime.includes("\\") || /[\0*?\[\]{}]/.test(runtime)) throw new PerlConfigError(`${where}.pathMappings keys must be exact absolute POSIX paths`);
+            const normalized = posix.normalize(runtime).replace(/\/$/, "") || "/";
+            if (Object.hasOwn(pathMappings, normalized)) throw new PerlConfigError(`${where}.pathMappings contains duplicate normalized path ${JSON.stringify(normalized)}`);
+            pathMappings[normalized] = relativePath(source, `${where}.pathMappings[${JSON.stringify(runtime)}]`);
+          }
+        }
+        projects.set(root, { root, includeRoots, ...(analysisCwd === undefined ? {} : { analysisCwd }), ...(pathMappings ? { pathMappings } : {}), confidence: "extracted", markers: projects.get(root)?.markers ?? [] });
       });
     }
     if (value.files !== undefined) {

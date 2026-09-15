@@ -2,7 +2,8 @@
  * Unobserved histories between independent entries are outside this model. */
 import { perlExecutionScope, perlFileExecution } from "./perl-context.js";
 import { createPerlSymbolEffectResolver } from "./perl-effects.js";
-import type { PerlContext, PerlFileFacts, PerlLoad, PerlModuleEnvironment, PerlSymbolMutation } from "./perl-types.js";
+import { perlCallerClosures } from "./perl-call-closure.js";
+import type { PerlCall, PerlContext, PerlFileFacts, PerlLoad, PerlModuleEnvironment, PerlSymbolMutation } from "./perl-types.js";
 
 export interface PerlMutationState {
   active: ReadonlySet<PerlSymbolMutation>;
@@ -37,6 +38,7 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
   const mutationFiles = new WeakMap<PerlSymbolMutation, string>();
   for (const [file, facts] of files) potential.set(root(file), [...potential.get(root(file)) ?? [], ...facts.mutations]);
   for (const [file, facts] of files) for (const mutation of facts.mutations) mutationFiles.set(mutation, file);
+  const allMutations = [...new Set([...files.values()].flatMap(facts => facts.mutations))];
   const loadedFiles = new Set([...environment.loads.values()].map((load) => load.file));
   // Anchor independent source entries to their own load context. A loaded
   // helper can call back into its importer; a sibling script is not thereby
@@ -59,9 +61,22 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
     return reached.has(other);
   };
   const summaries = createPerlSymbolEffectResolver(files, root, environment);
+  // Unknown calls commonly share the same complete effect set. Mapping that
+  // set once per call otherwise retains millions of identical array entries.
+  const mutationFactsMemo = new WeakMap<readonly { fact: PerlSymbolMutation }[], readonly PerlSymbolMutation[]>();
+  const mutationFacts = (effects: readonly { fact: PerlSymbolMutation }[]): readonly PerlSymbolMutation[] => {
+    let facts = mutationFactsMemo.get(effects);
+    if (!facts) { facts = [...new Set(effects.map(effect => effect.fact))]; mutationFactsMemo.set(effects, facts); }
+    return facts;
+  };
   interface Event { file: string; context: PerlContext; mutations: readonly PerlSymbolMutation[]; reentrant?: boolean; aliases?: readonly string[]; entered?: readonly string[] }
   const events = new Map<string, Event[]>();
   const callers = new Map<string, Event[]>();
+  const addCaller = (scope: string, event: Event) => {
+    const entries = callers.get(scope);
+    if (entries) entries.push(event);
+    else callers.set(scope, [event]);
+  };
   const loadedEvents: { file: string; load: PerlLoad; provider: string }[] = [];
   const forFile = (file: string): Event[] => {
     const cached = events.get(file);
@@ -69,10 +84,10 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
     const facts = files.get(file)!;
     const result: Event[] = facts.mutations.map((mutation) => ({ file, context: mutation, mutations: [mutation] }));
     for (const call of facts.calls) {
-      const event = { file, context: call, mutations: summaries.forCall(file, call).map((effect) => effect.fact), reentrant: summaries.unknownInvocation(file, call), aliases: summaries.invocationNames(file, call), entered: summaries.invocationScopes(file, call) };
+      const event = { file, context: call, mutations: mutationFacts(summaries.forCall(file, call)), reentrant: summaries.unknownInvocation(file, call), aliases: summaries.invocationNames(file, call), entered: [...new Set(summaries.invocationScopes(file, call))] };
       result.push(event);
       for (const scope of event.entered) {
-        callers.set(scope, [...callers.get(scope) ?? [], event]);
+        addCaller(scope, event);
       }
     }
     for (const load of facts.loads) {
@@ -93,9 +108,9 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
       }
       // Unmodeled loaded code can call back into the current routine. Retain
       // later load effects for possible re-entry, including computed requires.
-      const event = { file, context: load, mutations: effects.map((effect) => effect.fact), reentrant: effects.length > 0, entered: [...enteredScopes] };
+      const event = { file, context: load, mutations: mutationFacts(effects), reentrant: effects.length > 0, entered: [...enteredScopes] };
       result.push(event);
-      for (const scope of enteredScopes) callers.set(scope, [...callers.get(scope) ?? [], event]);
+      for (const scope of enteredScopes) addCaller(scope, event);
       loadedEvents.push({ file, load, provider: target.file });
     }
     events.set(file, result);
@@ -108,7 +123,9 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
     const byScope = new Map<string, Event[]>(), compileScopes = new Set<string>(), pending: string[] = [];
     for (const [file, entries] of events) for (const event of entries) {
       const scope = perlExecutionScope(files.get(file)!, event.context.scopeId);
-      byScope.set(scope, [...byScope.get(scope) ?? [], event]);
+      const scopeEvents = byScope.get(scope);
+      if (scopeEvents) scopeEvents.push(event);
+      else byScope.set(scope, [event]);
       if (event.context.phase === "compile" || event.context.phase === "BEGIN") pending.push(...event.entered ?? []);
     }
     // A textually runtime require can execute while compiling through BEGIN,
@@ -123,13 +140,13 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
     for (const { file, load, provider } of loadedEvents) {
       if (load.phase !== "compile" && load.phase !== "BEGIN" && !compileScopes.has(perlExecutionScope(files.get(file)!, load.scopeId))) continue;
       const context: PerlContext = { ...load, phase: "INIT" };
-      const event = { file, context, mutations: summaries.forLifecycle(provider).map((effect) => effect.fact) };
+      const event = { file, context, mutations: mutationFacts(summaries.forLifecycle(provider)) };
       events.get(file)!.push(event);
       const facts = files.get(provider)!;
       const scopes = new Set([...facts.mutations, ...facts.calls, ...facts.loads]
         .filter((fact) => fact.phase === "CHECK" || fact.phase === "INIT")
         .map((fact) => perlExecutionScope(facts, fact.scopeId)));
-      for (const scope of scopes) callers.set(scope, [...callers.get(scope) ?? [], event]);
+      for (const scope of scopes) addCaller(scope, event);
     }
     indexed = true;
   };
@@ -159,6 +176,7 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
       reentryMemo.set(scope, reentrant);
     }
     const mutations = new Set<PerlSymbolMutation>();
+    const applied = new Set<readonly PerlSymbolMutation[]>();
     for (const event of currentEvents) {
       const fact = event.context;
       const compile = fact.phase === "compile" || fact.phase === "BEGIN";
@@ -167,33 +185,104 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
       const applicable = early ? compile && before(fact, context)
         : initialization && (fact.phase !== "runtime" || deferred || unordered || before(fact, context))
           || sameScope && (unordered || reentrant || before(fact, context));
-      if (applicable) for (const mutation of event.mutations) mutations.add(mutation);
+      if (applicable && !applied.has(event.mutations)) {
+        applied.add(event.mutations);
+        for (const mutation of event.mutations) mutations.add(mutation);
+      }
     }
     const result = { scope, mutations };
     localMemo.set(context, result);
     return result;
   };
-  const incomingMemo = new Map<string, Map<string, ReadonlySet<PerlSymbolMutation>>>();
+  // Dense caller graphs repeatedly union the same symbol facts. Compact bit
+  // sets make those unions proportional to machine words instead of thousands
+  // of object lookups; public results retain the original fact identities.
+  const mutationIds = new WeakMap(allMutations.map((mutation, index) => [mutation, index] as const));
+  const wordCount = Math.ceil(allMutations.length / 32);
+  const localBitsMemo = new WeakMap<ReadonlySet<PerlSymbolMutation>, Uint32Array>();
+  const localBits = (mutations: ReadonlySet<PerlSymbolMutation>) => {
+    let bits = localBitsMemo.get(mutations);
+    if (!bits) {
+      bits = new Uint32Array(wordCount);
+      for (const mutation of mutations) {
+        const index = mutationIds.get(mutation)!;
+        bits[index >>> 5] |= 1 << (index & 31);
+      }
+      localBitsMemo.set(mutations, bits);
+    }
+    return bits;
+  };
+  interface Incoming { mutations: ReadonlySet<PerlSymbolMutation>; bits: Uint32Array }
+  const incomingMemo = new Map<string, Map<string, Incoming>>();
+  const allowedBitsMemo = new Map<string, Uint32Array>();
+  let loadedClosures: Map<string, Uint32Array> | undefined;
+  const loadedSets = new WeakMap<Uint32Array, ReadonlySet<PerlSymbolMutation>>();
+  const fromBits = (bits: Uint32Array) => new Set(allMutations.filter((_, index) => bits[index >>> 5] & 1 << (index & 31)));
+  const loadedIncoming = (scope: string): ReadonlySet<PerlSymbolMutation> => {
+    if (!loadedClosures) {
+      const edges = new Map<string, string[]>(), own = new Map<string, Uint32Array>();
+      for (const [target, entries] of callers) {
+        const scopes = new Set<string>(), effects = new Set<ReadonlySet<PerlSymbolMutation>>(), mask = new Uint32Array(wordCount);
+        for (const caller of entries) {
+          const local = localAt(caller.file, caller.context);
+          scopes.add(local.scope);
+          if (effects.has(local.mutations)) continue;
+          effects.add(local.mutations);
+          const bits = localBits(local.mutations);
+          for (let i = 0; i < wordCount; i++) mask[i] |= bits[i];
+        }
+        edges.set(target, [...scopes]); own.set(target, mask);
+      }
+      loadedClosures = perlCallerClosures(edges, own, wordCount);
+    }
+    const bits = loadedClosures.get(scope);
+    if (!bits) return new Set();
+    let mutations = loadedSets.get(bits);
+    if (!mutations) { mutations = fromBits(bits); loadedSets.set(bits, mutations); }
+    return mutations;
+  };
   const incoming = (file: string, scope: string): ReadonlySet<PerlSymbolMutation> => {
-    let cache = incomingMemo.get(file);
-    if (!cache) { cache = new Map(); incomingMemo.set(file, cache); }
+    if (loadedFiles.has(file)) return loadedIncoming(scope);
+    // Independent entry scripts retain their separate allowed-file closures.
+    const cacheKey = file;
+    let cache = incomingMemo.get(cacheKey);
+    if (!cache) { cache = new Map(); incomingMemo.set(cacheKey, cache); }
     const cached = cache.get(scope);
-    if (cached) return cached;
-    const active = new Set<PerlSymbolMutation>(), pending = [scope], seen = new Set<string>();
+    if (cached) return cached.mutations;
+    let mask = allowedBitsMemo.get(cacheKey);
+    if (!mask) {
+      mask = new Uint32Array(wordCount);
+      for (const [index, mutation] of allMutations.entries()) if (allowed(file, mutationFiles.get(mutation)!)) mask[index >>> 5] |= 1 << (index & 31);
+      allowedBitsMemo.set(cacheKey, mask);
+    }
+    const bits = new Uint32Array(wordCount), pending = [scope], seen = new Set([scope]);
+    const applied = new Set<ReadonlySet<PerlSymbolMutation>>();
+    let complete = wordCount === 0;
+    const merge = (next: Uint32Array) => {
+      complete = true;
+      for (let i = 0; i < wordCount; i++) {
+        bits[i] |= next[i] & mask![i];
+        if (bits[i] !== mask![i]) complete = false;
+      }
+    };
     // Complete each backward closure before caching it. In particular, do not
     // cache an incomplete result when a recursive component is first visited.
-    while (pending.length) {
+    while (pending.length && !complete) {
       const current = pending.pop()!;
-      if (seen.has(current)) continue;
-      seen.add(current);
+      const prior = cache.get(current);
+      if (prior) { merge(prior.bits); continue; }
       for (const caller of callers.get(current) ?? []) {
         if (!allowed(file, caller.file)) continue;
         const local = localAt(caller.file, caller.context);
-        for (const mutation of local.mutations) if (allowed(file, mutationFiles.get(mutation)!)) active.add(mutation);
-        pending.push(local.scope);
+        if (!applied.has(local.mutations)) { applied.add(local.mutations); merge(localBits(local.mutations)); }
+        if (!seen.has(local.scope)) { seen.add(local.scope); pending.push(local.scope); }
+        // The symbol effect resolver only returns facts from these files.
+        // Once all allowed facts are present, further traversal cannot add one.
+        if (complete) break;
       }
     }
-    cache.set(scope, active);
+    const active = fromBits(bits);
+    cache.set(scope, { mutations: active, bits });
     return active;
   };
   const memo = new WeakMap<PerlContext, PerlMutationState>();
@@ -227,5 +316,9 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
     importMemo.set(load, result);
     return result;
   };
-  return { at, imported };
+  return { at, imported,
+    callEffects: (file: string, call: PerlCall) => mutationFacts(summaries.forCall(file, call)),
+    importEffects: (file: string, packageName: string, operation: "import" | "unimport") => mutationFacts(summaries.forImport(file, packageName, operation)),
+    invocationScopes: summaries.invocationScopes, dispatchScopes: summaries.dispatchScopes, importScopes: summaries.importScopes,
+    unknownInvocation: summaries.unknownInvocation };
 }

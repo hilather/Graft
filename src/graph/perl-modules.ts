@@ -17,6 +17,7 @@ interface SearchState {
   known: boolean;
   cacheKnown: boolean;
   cwd?: string;
+  pathMappings?: PerlProject["pathMappings"];
   loaded: Map<string, PerlModuleTarget | null>;
   pendingLifecycle: PerlIncludeEffect[];
   runtimeStarted: boolean;
@@ -25,9 +26,16 @@ type Event = { type: "load"; fact: PerlLoad } | { type: "include"; fact: PerlInc
 
 function copyState(state: SearchState): SearchState { return { ...state, roots: [...state.roots], loaded: new Map(state.loaded), pendingLifecycle: [...state.pendingLifecycle] }; }
 function inside(file: string, root: string): boolean { return root === "" || file.startsWith(`${root}/`); }
-function relativeLiteral(path: string, cwd: string | undefined, graphRoot?: string): string | null {
+function relativeLiteral(path: string, cwd: string | undefined, graphRoot?: string, mappings?: PerlProject["pathMappings"]): string | null {
   if (path.includes("\\") || path.includes("\0")) return null;
   if (isAbsolute(path)) {
+    const normalized = posix.normalize(path);
+    const prefix = Object.keys(mappings ?? {}).filter(prefix => prefix === "/" || normalized === prefix || normalized.startsWith(`${prefix}/`))
+      .sort((a, b) => b.length - a.length)[0];
+    if (prefix !== undefined) {
+      const mapped = posix.join(mappings![prefix], normalized.slice(prefix.length).replace(/^\/+/, ""));
+      return mapped === "." ? "" : mapped;
+    }
     if (!graphRoot) return null;
     const rel = relative(graphRoot, path).replaceAll("\\", "/");
     return rel !== ".." && !rel.startsWith("../") && !isAbsolute(rel) ? rel : null;
@@ -77,8 +85,8 @@ export function buildPerlModuleEnvironment(files: ReadonlyMap<string, PerlFileFa
     if (load.target.kind !== "known") return { target: null, reason: "computed load target" };
     const request = load.target.value;
     if (load.targetKind === "file" && (request.startsWith("./") || request.startsWith("../") || isAbsolute(request) || /^[A-Za-z]:/.test(request))) {
-      const path = relativeLiteral(request, state.cwd, graphRoot);
-      return path !== null && files.has(path) ? { target: { file: path, root: state.cwd ?? "", confidence: "extracted" } } : { target: null, reason: path === null ? "file path has no proven analysis CWD or leaves the visible root" : undefined };
+      const path = relativeLiteral(request, state.cwd, graphRoot, state.pathMappings);
+      return path !== null && files.has(path) ? { target: { file: path, root: state.cwd ?? "", confidence: "extracted" } } : { target: null, reason: path === null ? isAbsolute(request) ? "Absolute file path is outside the visible root and has no path mapping" : "file path has no proven analysis CWD or leaves the visible root" : undefined };
     }
     if (!state.known) return { target: null, reason: "load path was changed by an unknown or conditional effect" };
     const suffix = load.targetKind === "module" ? request.replaceAll("::", "/") + ".pm" : request;
@@ -114,10 +122,12 @@ export function buildPerlModuleEnvironment(files: ReadonlyMap<string, PerlFileFa
       report(file, "PERL_INCLUDE_PATH_UNKNOWN", "Cannot establish the ordered load path after this effect", effect);
       return;
     }
-    const paths = effect.directories.value.map((path) => relativeLiteral(path, state.cwd, graphRoot));
+    const paths = effect.directories.value.map((path) => relativeLiteral(path, state.cwd, graphRoot, state.pathMappings));
     if (paths.some((path) => path === null)) {
       state.known = false;
-      report(file, "PERL_INCLUDE_PATH_UNKNOWN", "Relative use lib/@INC paths require an explicit analysisCwd", effect);
+      const unresolved = effect.directories.value[paths.findIndex(path => path === null)];
+      report(file, "PERL_INCLUDE_PATH_UNKNOWN", isAbsolute(unresolved) ? "Absolute use lib/@INC path is outside the visible root and has no path mapping"
+        : state.cwd === undefined ? "Relative use lib/@INC paths require an explicit analysisCwd" : "use lib/@INC path leaves the visible root", effect);
       return;
     }
     const roots = [...new Set(paths as string[])].map((path) => ({ path, confidence: "extracted" as const }));
@@ -145,9 +155,14 @@ export function buildPerlModuleEnvironment(files: ReadonlyMap<string, PerlFileFa
     const result = effectProject(parent); effectProjects.set(root, result); return result;
   };
   for (const project of new Map([...projects.values()].map((project) => [project.root, project])).values()) if (project.confidence === "extracted") {
-    for (const file of fileNames) if (project.includeRoots.some((root) => inside(file, root))) effectProjects.set(effectProject(project.root), effectProject(projects.get(file)!.root));
+    for (const file of fileNames) if ([...project.includeRoots, ...Object.values(project.pathMappings ?? {})].some((root) => file === root || inside(file, root))) effectProjects.set(effectProject(project.root), effectProject(projects.get(file)!.root));
   }
-  const effects = createPerlLoadEffectResolver(files, (file) => effectProject(projects.get(file)!.root));
+  const effects = createPerlLoadEffectResolver(files, (file) => effectProject(projects.get(file)!.root), (file, load) => {
+    if (load.target.kind !== "known" || load.targetKind !== "file") return [];
+    const project = projects.get(file)!;
+    const path = relativeLiteral(load.target.value, project.analysisCwd, graphRoot, project.pathMappings);
+    return path === null ? [] : [path];
+  });
   const invalidate = (state: SearchState, effects: readonly PerlIncludeEffect[]) => {
     if (effects.length) state.known = false;
     if (effects.some((effect) => effect.affectsCwd)) state.cwd = undefined;
@@ -164,7 +179,7 @@ export function buildPerlModuleEnvironment(files: ReadonlyMap<string, PerlFileFa
     const entry = active.size === 0;
     active.add(file);
     const facts = files.get(file)!;
-    if (!state.runtimeStarted) state.pendingLifecycle.push(...effects.forLifecycle(file).map((effect) => effect.fact));
+    if (!state.runtimeStarted) state.pendingLifecycle.push(...effects.forLifecycle(file, !entry).map((effect) => effect.fact));
     for (const event of events.get(file) ?? []) {
       const fact = event.fact;
       // CHECK/INIT belong to the main program's phase transition. A module's
@@ -221,7 +236,7 @@ export function buildPerlModuleEnvironment(files: ReadonlyMap<string, PerlFileFa
   };
   for (const file of fileNames) {
     const project = projects.get(file)!;
-    const state: SearchState = { roots: project.includeRoots.map((path) => ({ path, confidence: project.confidence })), orderedPrefix: project.confidence === "extracted" ? project.includeRoots.length : 0, known: true, cacheKnown: true, cwd: project.analysisCwd, loaded: new Map(), pendingLifecycle: [], runtimeStarted: false };
+    const state: SearchState = { roots: project.includeRoots.map((path) => ({ path, confidence: project.confidence })), orderedPrefix: project.confidence === "extracted" ? project.includeRoots.length : 0, known: true, cacheKnown: true, cwd: project.analysisCwd, pathMappings: project.pathMappings, loaded: new Map(), pendingLifecycle: [], runtimeStarted: false };
     visit(file, state, new Set());
   }
   for (const [file, facts] of files) for (const load of facts.loads) {

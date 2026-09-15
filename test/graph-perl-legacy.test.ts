@@ -78,3 +78,25 @@ sub run { "__PACKAGE__"->target(); factory()->target(); }
     assert.ok(JSON.stringify(diagnostics(f)).includes("PERL_DYNAMIC_DISPATCH"));
   } finally { f.close(); }
 });
+
+test("method-looking text after interpolated subscripts stays literal", async () => {
+  const f = perlRepo({ "generator.pl": String.raw`package Generator;
+sub finish {}
+my $text = "$h{key}->new(\$self)";
+my $array = "$a[0]->method()";
+my $chain = "$h{key}->{child}[0]->method()";
+my $real = "$h{key}->{child}[0]";
+my $regex = qr/$h{key}->method()/;
+my $doc = <<END;
+$h{key}->method()
+END
+sub following { finish() }
+` });
+  try {
+    await f.build();
+    assert.ok(!JSON.stringify(diagnostics(f)).includes("PERL_PARSE_ERROR"));
+    assert.deepEqual(semanticEdges(f.graph()), [
+      "generator.pl#Generator::following -> generator.pl#Generator::finish [extracted]",
+    ]);
+  } finally { f.close(); }
+});

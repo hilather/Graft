@@ -3,7 +3,7 @@
 import type { RawEdge } from "./extract.js";
 import type { NodeV1, Confidence } from "./types.js";
 
-export const PERL_FACTS_VERSION = 4 as const;
+export const PERL_FACTS_VERSION = 10 as const;
 export const PERL_MAX_SOURCE_CODE_UNITS = 2_000_000;
 
 export interface PerlRange {
@@ -99,7 +99,11 @@ export interface PerlIncludeEffect extends PerlContext {
 
 export interface PerlSymbolMutation extends PerlContext {
   names: PerlKnown<string[]>;
-  /** Literal signature-free sub {} replacement; never proves a call target. */
+  /** A literal CODE-slot assignment captures this reference at assignment time. */
+  aliasReference?: PerlReference;
+  /** A directly assigned anonymous CODE value, separate from the old slot. */
+  replacementNodeId?: string;
+  /** Literal signature-free sub {} replacement has no reentrant body effects. */
   emptyReplacement?: true;
   mechanism?: "framework";
   frameworkEffect?: "generated" | "modifier";
@@ -113,6 +117,8 @@ export interface PerlBinding {
   name: string;
   kind: "lexical-sub" | "lexical-coderef" | "lexical-variable" | "package-alias" | "our-alias";
   target: PerlKnown<{ nodeId: string } | { loadId: string; exportedName: string }>;
+  /** Resolve this CODE reference at initialization, before later slot changes. */
+  captureReference?: PerlReference;
   range: PerlRange;
   visibleFrom: number;
   visibleUntil: number;
@@ -166,6 +172,8 @@ export interface PerlReference extends PerlContext {
 
 export interface PerlInheritance extends PerlContext {
   parents: PerlKnown<string[]>;
+  /** Finite alternatives for one append; these are choices, not simultaneous parents. */
+  parentAlternatives?: string[][];
   operation: "replace" | "append";
   mechanism: "parent" | "base" | "ISA" | "class" | "framework" | "mro";
   noRequire: boolean;

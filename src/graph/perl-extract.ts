@@ -3,7 +3,7 @@ import { posix } from "node:path";
 import type { Node } from "web-tree-sitter";
 import { contentHash } from "../util/id.js";
 import type { Kind, NodeV1 } from "./types.js";
-import type { PerlBinding, PerlContext, PerlDefinition, PerlDiagnostic, PerlExport, PerlExtractResult, PerlFileFacts, PerlKnown, PerlLoad, PerlPackageRegion, PerlPhase, PerlRange, PerlReceiver, PerlScope } from "./perl-types.js";
+import type { PerlBinding, PerlContext, PerlDefinition, PerlDiagnostic, PerlExport, PerlExtractResult, PerlFileFacts, PerlInheritance, PerlKnown, PerlLoad, PerlPackageRegion, PerlPhase, PerlRange, PerlReceiver, PerlReference, PerlScope } from "./perl-types.js";
 import { PERL_FACTS_VERSION } from "./perl-types.js";
 import { PERL_FRAMEWORK_DECLARATIONS, PERL_FRAMEWORK_NAMES, readPerlFrameworkDeclaration } from "./perl-frameworks.js";
 import { perlFileExecution } from "./perl-context.js";
@@ -27,8 +27,8 @@ export function perlRange(node: Node): PerlRange {
   return { start: node.startIndex, end: node.endIndex, startLine: node.startPosition.row + 1, endLine: node.endPosition.row + 1 };
 }
 
-export function extractPerlTree(file: string, source: string, root: Node): PerlExtractResult {
-  return new PerlExtractor(file, source).extract(root);
+export function extractPerlTree(file: string, source: string, root: Node, parseEmbedded?: (replacement: Node) => Node | null): PerlExtractResult {
+  return new PerlExtractor(file, source, parseEmbedded).extract(root);
 }
 
 interface WalkContext {
@@ -55,11 +55,14 @@ class PerlExtractor {
   private readonly bindingsByScopeAndName = new Map<string, Map<string, PerlBinding[]>>();
   private readonly receiverScopes = new Set<string>();
   private readonly callbackScopes = new Set<string>();
+  private readonly stringInitializers = new Map<string, { value: string; context: PerlContext }>();
+  private readonly stringEvals: { node: Node; ctx: WalkContext }[] = [];
+  private readonly computedParents: { fact: PerlInheritance; node: Node; scalar: Node; ctx: WalkContext }[] = [];
   private readonly exporter = new Map<string, PerlExport["exporter"]>();
   private opaqueRecoveryStart = Infinity;
   private hasParseErrors = false;
 
-  constructor(private readonly file: string, private readonly source: string) {
+  constructor(private readonly file: string, private readonly source: string, private readonly parseEmbedded?: (replacement: Node) => Node | null) {
     this.result = perlFileResult(file, source);
     this.facts = this.result.languageData;
     this.minted.add(file);
@@ -91,6 +94,7 @@ class PerlExtractor {
     }
     const scope = this.scope(root, null, "file", this.file);
     this.sequence(root.namedChildren, { scope, packageName: "main", packageNode: null, owner: this.file, phase: "runtime", conditional: false, contextKnown: true });
+    this.finishStringEvals(root);
     this.mergeDeclarations();
     this.finishBindings();
     this.finishExports();
@@ -197,6 +201,8 @@ class PerlExtractor {
       return;
     }
     if (OPAQUE_PERL.has(type) || type === "__DATA__" || type === "__END__") {
+      if (type === "substitution_regexp" && this.substitution(node, ctx)) return;
+      if (this.interpolation(node, ctx)) return;
       if (hasEmbeddedCode(node)) this.diagnostic("PERL_EMBEDDED_CODE_UNSUPPORTED", "Executable interpolation or regex code is not traversed", node);
       return;
     }
@@ -225,6 +231,9 @@ class PerlExtractor {
       const operator = left && right ? this.source.slice(left.endIndex, right.startIndex).trim() : "";
       if (left && right && ["&&", "||", "//", "and", "or"].includes(operator)) { this.walk(left, ctx); this.walk(right, { ...ctx, conditional: true }); return; }
     }
+    if (type === "func1op_call_expression" && ["defined", "exists"].includes(node.children[0]?.text ?? "")
+      && this.subroutineOperand(node, node.namedChildren.find(child => child.type !== "comment") ?? null, ctx, false)) return;
+    if (type === "undef_expression" && this.subroutineOperand(node, node.namedChildren.find(child => child.type !== "comment") ?? null, ctx, true)) return;
     if (type === "func1op_call_expression") {
       const name = node.children[0]?.text;
       if (name && PERL_NAME.test(name)) this.facts.calls.push({ ...this.context(node, ctx), form: "bare", name: known(name), syntax: "builtin" });
@@ -246,17 +255,22 @@ class PerlExtractor {
             operation: "require", targetKind: "module", target: known(required), arguments: { kind: "empty" }, trapped: true });
           return;
         }
-        this.diagnostic("PERL_DYNAMIC_EVAL", "String eval is not statically expanded", node);
-        this.facts.mutations.push({ ...this.context(node, ctx), names: unknown("string eval can change package bindings") });
-        this.facts.includeEffects.push({ ...this.context(node, ctx), operation: "unknown", directories: unknown("string eval can change load state"), affectsLoaded: true, affectsCwd: true });
+        // Finish after all lexical declarations and writes are visible. A later
+        // compiled closure can change a captured scalar before this eval runs.
+        this.stringEvals.push({ node, ctx: { ...ctx } });
         return;
       }
     }
     if (type === "refgen_expression") {
       const ref = node.firstNamedChild;
+      if (ref?.type === "scalar") {
+        const binding = this.binding(variableName(ref) ?? "", ctx.scope.id, node.startIndex);
+        if (binding?.kind === "lexical-coderef" || binding?.receiver) binding.invalidations.push({ at: node.endIndex, reason: "escape" });
+      }
       if (ref?.type === "function") {
         const name = ref.text.replace(/^&/, "");
         this.facts.references.push({ ...this.context(node, ctx), form: PERL_NAME.test(name) ? "named-coderef" : "dynamic", name: PERL_NAME.test(name) ? known(name) : unknown("dynamic coderef") });
+        this.sequence(ref.namedChildren, ctx);
         return;
       }
     }
@@ -268,6 +282,67 @@ class PerlExtractor {
     }
     const nested = CONDITIONAL.has(type) ? { ...ctx, conditional: true } : ctx;
     this.sequence(node.namedChildren, nested);
+  }
+
+  private subroutineOperand(node: Node, operand: Node | null, ctx: WalkContext, undefine: boolean): boolean {
+    // The grammar uses the call shape for &foo in defined/exists/undef too.
+    // Parentheses on the operator/group are harmless; &foo() invokes foo.
+    while (operand?.type === "parenthesized_expression" && operand.namedChildren.filter(child => child.type !== "comment").length === 1) {
+      operand = operand.namedChildren.find(child => child.type !== "comment")!;
+    }
+    if (operand?.type !== "function_call_expression") return false;
+    const target = operand.childForFieldName("function");
+    if (!target?.text.startsWith("&") || operand.children.some(child => child.id !== target.id && child.type !== "comment")) return false;
+    if (undefine) {
+      const name = target.text.slice(1);
+      const binding = PERL_NAME.test(name) ? this.binding(name, ctx.scope.id, node.startIndex) : undefined;
+      if (binding) binding.invalidations.push({ at: node.endIndex, reason: "assignment" });
+      else this.facts.mutations.push({ ...this.context(node, ctx), names: PERL_NAME.test(name)
+        ? known([name.includes("::") ? name : `${ctx.packageName}::${name}`]) : unknown("computed subroutine undefinition") });
+    }
+    // Computing the name can execute code even though checking its slot does not.
+    this.sequence(target.namedChildren, ctx);
+    return true;
+  }
+
+  private substitution(node: Node, ctx: WalkContext): boolean {
+    // /e is compiled source; /ee performs an additional runtime string eval.
+    const modifiers = node.childForFieldName("modifiers")?.text ?? "";
+    if ([...modifiers].filter(flag => flag === "e").length !== 1) return false;
+    const pattern = node.childForFieldName("content");
+    if (pattern && /(?:^|[^\\])(?:\\\\)*\(\?\??\{/.test(pattern.text)) return false;
+    const replacement = node.namedChildren.find(child => child.type === "replacement");
+    const block = replacement && this.parseEmbedded?.(replacement);
+    if (!block) return false;
+    if (pattern) this.interpolationExpressions(pattern, ctx);
+    // The expression runs only after a match, possibly repeatedly with /g.
+    // Its implicit block confines lexicals while retaining the enclosing
+    // routine's package, arguments, phase, and graph owner.
+    this.walk(block, { ...ctx, conditional: true });
+    return true;
+  }
+
+  private interpolation(node: Node, ctx: WalkContext): boolean {
+    if (!["interpolated_string_literal", "command_string", "quoted_regexp", "match_regexp", "substitution_regexp"].includes(node.type)) return false;
+    if (node.type === "substitution_regexp" && /e/.test(node.childForFieldName("modifiers")?.text ?? "")) return false;
+    const content = node.childForFieldName("content");
+    if (content?.type === "regexp_content" && /(?:^|[^\\])(?:\\\\)*\(\?\??\{/.test(content.text)) return false;
+    if (content) this.interpolationExpressions(content, ctx);
+    if (node.type === "substitution_regexp") {
+      const replacement = node.namedChildren.find(child => child.type === "replacement");
+      if (replacement) this.interpolationExpressions(replacement, { ...ctx, conditional: true });
+    }
+    return true;
+  }
+
+  private interpolationExpressions(node: Node, ctx: WalkContext): void {
+    const pending = [...node.namedChildren].reverse();
+    while (pending.length) {
+      const child = pending.pop()!;
+      if (["block", "function_call_expression", "method_call_expression", "coderef_call_expression"].includes(child.type)) {
+        this.walk(child, ctx);
+      } else if (!OPAQUE_PERL.has(child.type)) pending.push(...[...child.namedChildren].reverse());
+    }
   }
 
   private declaration(node: Node, ctx: WalkContext): void {
@@ -313,7 +388,8 @@ class PerlExtractor {
     let id: string | undefined;
     if (bindingName) {
       const qualified = `${ctx.packageName}::${bindingName}`;
-      const symbol = this.symbol(bindingName, qualified, `${qualified}@${ctx.scope.id.slice(ctx.scope.id.lastIndexOf(":") + 1)}`, "function", node, body.startIndex, ctx.owner);
+      const occurrence = bindingName.startsWith("*") ? `:${node.startIndex}` : "";
+      const symbol = this.symbol(bindingName, qualified, `${qualified}@${ctx.scope.id.slice(ctx.scope.id.lastIndexOf(":") + 1)}${occurrence}`, "function", node, body.startIndex, ctx.owner);
       id = owner = symbol.id;
       const fact: PerlDefinition = { nodeId: id, name: bindingName, qualifiedName: qualified, packageName: ctx.packageName, packageNode: ctx.packageNode, scopeId: ctx.scope.id, kind: "callback", range: perlRange(node), declarations: [perlRange(node)], hasBody: true, conditional: ctx.conditional };
       this.facts.definitions.push(fact);
@@ -420,9 +496,23 @@ class PerlExtractor {
     if (!name || /^[%*](?:main::)?INC$/.test(name) || name.endsWith("EXPORT_FAIL")) this.unknownTableMutation(left, ctx);
     if (name && (declaration === "my" || declaration === "state")) {
       const binding = this.newBinding(name, left, ctx, node.endIndex);
+      const value = literalString(right);
+      if (declaration === "my" && name.startsWith("$") && value !== null
+        && this.source.slice(left.endIndex, right.startIndex).trim() === "=") {
+        this.stringInitializers.set(binding.id, { value, context: this.context(node, ctx) });
+      }
       if (right.type === "anonymous_subroutine_expression") {
         const id = this.anonymous(right, ctx, name);
         if (id) { binding.kind = "lexical-coderef"; binding.target = known({ nodeId: id }); this.callbackScopes.add(binding.scopeId); }
+        return;
+      }
+      const ref = right.type === "refgen_expression" ? right.firstNamedChild : null;
+      const refName = ref?.type === "function" ? ref.text.replace(/^&/, "") : null;
+      if (declaration === "my" && name.startsWith("$") && refName && PERL_NAME.test(refName) && !right.hasError
+        && this.source.slice(left.endIndex, right.startIndex).trim() === "=") {
+        const captureReference: PerlReference = { ...this.context(right, ctx), form: "named-coderef", name: known(refName) };
+        binding.kind = "lexical-coderef"; binding.captureReference = captureReference;
+        this.callbackScopes.add(binding.scopeId); this.facts.references.push(captureReference);
         return;
       }
       const receiver = this.blessReceiver(right, ctx);
@@ -432,12 +522,21 @@ class PerlExtractor {
       if (binding) binding.invalidations.push({ at: node.startIndex, reason: "assignment" });
     } else if (declaration) this.variable(left, ctx);
     if (left.type === "glob") {
-      this.diagnostic("PERL_SYMBOL_TABLE_MUTATION", "Typeglob assignment does not establish a proven callable alias", node);
       const identity = name ? packageNameOf(name.slice(1), ctx.packageName) : null;
+      const ref = right.type === "refgen_expression" ? right.firstNamedChild : null;
+      const refName = ref?.type === "function" ? ref.text.replace(/^&/, "") : null;
+      const aliasReference: PerlReference | undefined = identity && refName && PERL_NAME.test(refName) && !right.hasError
+        && this.source.slice(left.endIndex, right.startIndex).trim() === "="
+        ? { ...this.context(right, ctx), form: "named-coderef", name: known(refName) } : undefined;
       const body = right.type === "anonymous_subroutine_expression" && right.namedChildren.length === 1 ? right.firstNamedChild : null;
       const emptyReplacement = body?.type === "block" && body.namedChildren.length === 0 && !right.hasError
         && this.source.slice(left.endIndex, right.startIndex).trim() === "=";
-      this.facts.mutations.push({ ...this.context(node, ctx), names: identity ? known([identity.qualifiedName]) : unknown("computed typeglob"), ...(emptyReplacement ? { emptyReplacement: true as const } : {}) });
+      const replacementNodeId = identity && right.type === "anonymous_subroutine_expression" && !right.hasError
+        && this.source.slice(left.endIndex, right.startIndex).trim() === "=" ? this.anonymous(right, ctx, name!) : undefined;
+      if (!aliasReference && !replacementNodeId) this.diagnostic("PERL_SYMBOL_TABLE_MUTATION", "Typeglob assignment does not establish a proven callable alias", node);
+      this.facts.mutations.push({ ...this.context(node, ctx), names: identity ? known([identity.qualifiedName]) : unknown("computed typeglob"), ...(aliasReference ? { aliasReference } : {}), ...(replacementNodeId ? { replacementNodeId } : {}), ...(emptyReplacement ? { emptyReplacement: true as const } : {}) });
+      if (aliasReference) { this.facts.references.push(aliasReference); return; }
+      if (replacementNodeId) return;
     }
     this.walk(right, ctx);
   }
@@ -502,7 +601,9 @@ class PerlExtractor {
     }
     if (variable[0] === "@" && identity.name === "ISA") {
       const parents = values;
-      this.facts.inheritance.push({ ...this.context(node, ctx), packageName: identity.packageName, parents, operation: append ? "append" : "replace", mechanism: "ISA", noRequire: true, mro: "dfs", unknownMutation: parents.kind === "unknown" || operator !== "=" || ctx.conditional || (ctx.phase === "runtime" && !perlFileExecution(this.facts, ctx.scope.id)) });
+      const fact: PerlInheritance = { ...this.context(node, ctx), packageName: identity.packageName, parents, operation: append ? "append" : "replace", mechanism: "ISA", noRequire: true, mro: "dfs", unknownMutation: parents.kind === "unknown" || operator !== "=" || ctx.conditional || (ctx.phase === "runtime" && !perlFileExecution(this.facts, ctx.scope.id)) };
+      this.facts.inheritance.push(fact);
+      if (append && operator === "=" && right.type === "scalar" && !rest.length && !ctx.conditional) this.computedParents.push({ fact, node, scalar: right, ctx: { ...ctx } });
       if (parents.kind === "known" && parents.value.includes("Exporter") && !ctx.conditional) this.exporter.set(identity.packageName, "inheritance");
       return;
     }
@@ -540,6 +641,9 @@ class PerlExtractor {
 
   private call(node: Node, ctx: WalkContext, type: string): void {
     const args = node.childForFieldName("arguments");
+    const functionTarget = node.childForFieldName("function");
+    if (functionTarget && /^(?:CORE::)(?:defined|exists|undef)$/.test(functionTarget.text)
+      && this.subroutineOperand(node, args, ctx, functionTarget.text === "CORE::undef")) return;
     if (type === "method_call_expression") {
       const method = node.childForFieldName("method")!;
       const invocant = node.childForFieldName("invocant");
@@ -565,7 +669,8 @@ class PerlExtractor {
         const filehandle = indirectObject && !functionNode!.text.startsWith("&") && /^(?:CORE::)?(?:print|printf|say)$/.test(functionName);
         const indirect = indirectObject && !filehandle;
         const subtraction = !indirect && !functionNode!.text.startsWith("&") && type === "ambiguous_function_call_expression" && args ? this.constantSubtraction(args, functionName, node, ctx) : undefined;
-        const emptyArguments = !indirect && (!args || (args.type === "parenthesized_expression" && args.namedChildren.every((item) => item.type === "comment")));
+        const inlineArguments = functionNode!.text.startsWith("&") && !args && node.namedChildren.some(child => child.id !== functionNode!.id && child.type !== "comment");
+        const emptyArguments = !indirect && ((!args && !inlineArguments) || (args?.type === "parenthesized_expression" && args.namedChildren.every((item) => item.type === "comment")));
         this.facts.calls.push({ ...this.context(node, ctx), form: isName && !indirect ? functionName.includes("::") ? "qualified" : "bare" : "dynamic", name: isName && !indirect ? known(functionName) : unknown("computed or indirect function call"), ...(functionNode?.text.startsWith("&") ? { syntax: "ampersand" as const } : {}), ...(emptyArguments || subtraction ? { emptyArguments: true as const } : {}), ...(subtraction ? { requiresInlineConstant: subtraction, range: perlRange(functionNode!) } : {}) });
         if (filehandle) for (const block of indirectObject.namedChildren) if (block.type === "block") this.walk(block, ctx);
         if (!indirect && args && this.frameworkCall(node, ctx, functionName, args)) return;
@@ -583,15 +688,19 @@ class PerlExtractor {
         }
         if (["splice", "pop", "shift", "delete", "undef"].includes(functionName) && args) this.unknownTableMutation(args, ctx);
       }
+      if (functionNode) this.sequence(functionNode.namedChildren, ctx);
     }
-    if (args) {
+    // Ampersand calls have inline argument children rather than an arguments field.
+    const argumentNodes = args ? [args] : functionTarget?.text.startsWith("&")
+      ? node.namedChildren.filter(child => child.id !== functionTarget.id) : [];
+    for (const argument of argumentNodes) {
       // Passing a lexical coderef to unknown code can expose an alias or mutate
       // its value. Later exact calls must not rely on the original assignment.
-      for (const variable of this.hasEscapableBinding(ctx.scope.id) ? descendants(args, (n) => n.type === "scalar") : []) {
+      for (const variable of this.hasEscapableBinding(ctx.scope.id) ? descendants(argument, (n) => n.type === "scalar") : []) {
         const binding = this.binding(variableName(variable) ?? "", ctx.scope.id, variable.startIndex);
         if (binding?.kind === "lexical-coderef" || binding?.receiver) binding.invalidations.push({ at: node.endIndex, reason: "escape" });
       }
-      this.walk(args, ctx);
+      this.walk(argument, ctx);
     }
   }
 
@@ -701,6 +810,102 @@ class PerlExtractor {
       if (intent.name.kind !== "known" || intent.name.value.includes("::")) continue;
       const binding = this.binding(intent.name.value, intent.scopeId, intent.range.start);
       if (binding) intent.bindingId = binding.id;
+    }
+  }
+
+  private requireInterpolation(node: Node): Node | null {
+    const string = node.namedChildren.length === 1 ? node.firstNamedChild : null;
+    if (string?.type !== "interpolated_string_literal" || string.hasError) return null;
+    const content = string.childForFieldName("content");
+    const scalar = content?.namedChildren.length === 1 ? content.firstNamedChild : null;
+    if (scalar?.type !== "scalar" || !/^\$[A-Za-z_]\w*$/.test(scalar.text)) return null;
+    return content!.text === `require ${scalar.text}` || content!.text === `require ${scalar.text};` ? scalar : null;
+  }
+
+  private finishStringEvals(root: Node): void {
+    if (!this.stringEvals.length && !this.computedParents.length) return;
+    // Only inspect the CST again for the uncommon finite-eval case. Scope
+    // ranges retain lexical identity across shadowing and compiled closures.
+    const scopes = [...this.facts.scopes].sort((a, b) => (a.range.end - a.range.start) - (b.range.end - b.range.start));
+    const scopeAt = (node: Node) => scopes.find(scope => scope.range.start <= node.startIndex && node.endIndex <= scope.range.end)!;
+    const bindingAt = (name: string, node: Node) => this.binding(name, scopeAt(node).id, node.startIndex);
+    const scalarName = (node: Node) => node.firstNamedChild?.type === "varname" ? `$${node.firstNamedChild.text}` : node.text;
+    const controlUnknown = this.hasParseErrors || descendants(root, n => n.type === "statement_label" || n.type === "label"
+      || n.type === "loopex_expression" && /^goto\b/.test(n.text)).length > 0;
+    const laterRuntime = (node: Node, site: Node) => {
+      if (node.startIndex <= site.endIndex || !perlFileExecution(this.facts, scopeAt(node).id)) return false;
+      for (let parent: Node | null = node; parent; parent = parent.parent) {
+        if (["use_statement", "use_version_statement", "phaser_statement", "class_phaser_statement"].includes(parent.type)) return false;
+      }
+      return true;
+    };
+    const finiteValues = (scalar: Node, site: Node, ctx: WalkContext): string[] | null => {
+      const binding = bindingAt(scalar.text, scalar), init = binding && this.stringInitializers.get(binding.id);
+      if (!binding || !init || controlUnknown || ctx.phase !== "runtime" || ctx.conditional
+        || !perlFileExecution(this.facts, ctx.scope.id) || init.context.phase !== "runtime" || init.context.conditional
+        || !perlFileExecution(this.facts, init.context.scopeId) || init.context.range.end > site.startIndex) return null;
+      const values = new Set([init.value]);
+      for (const { node: other } of this.stringEvals) {
+        if (laterRuntime(other, site) || bindingAt(scalar.text, other)?.id !== binding.id) continue;
+        // An unrestricted string eval can write any visible lexical, even
+        // without a CST reference to its name. Only this same bounded template
+        // is harmless to the binding being proved.
+        const ref = this.requireInterpolation(other);
+        if (!ref || bindingAt(ref.text, ref)?.id !== binding.id) return null;
+      }
+      for (const node of descendants(root, n => n.type === "scalar" || OPAQUE_PERL.has(n.type))) {
+        if (laterRuntime(node, site) || bindingAt(scalar.text, node)?.id !== binding.id) continue;
+        if (OPAQUE_PERL.has(node.type)) {
+          if (hasEmbeddedCode(node)) {
+            // A single /e replacement that never names this lexical and has
+            // no nested eval cannot write it. /ee and regex code assertions
+            // can introduce another lexical eval and remain opaque here.
+            const replacement = node.namedChildren.find(child => child.type === "replacement");
+            const modifiers = node.namedChildren.find(child => child.type === "substitution_regexp_modifiers")?.text ?? "";
+            const pattern = node.namedChildren.find(child => child.type === "regexp_content")?.text ?? "";
+            if (node.type !== "substitution_regexp" || !replacement || modifiers.split("e").length !== 2
+              || /\(\?\??\{/.test(pattern) || /\beval(?:bytes)?\b|\bgoto\b/.test(replacement.text)
+              || replacement.text.includes(scalar.text.slice(1))) return null;
+          }
+          continue;
+        }
+        if (scalarName(node) !== scalar.text) continue;
+        if (node.id === scalar.id) continue;
+        const parent = node.parent;
+        if (parent?.type === "assignment_expression" && parent.childForFieldName("left")?.id === node.id) {
+          const rhs = parent.childForFieldName("right"), value = literalString(rhs);
+          if (!rhs || value === null || this.source.slice(node.endIndex, rhs.startIndex).trim() !== "=") return null;
+          values.add(value);
+        } else if (parent?.type === "string_content" && parent.parent?.parent?.type === "eval_expression"
+          && this.requireInterpolation(parent.parent.parent)?.id === node.id) {
+          // String interpolation copies the value; it cannot expose an alias.
+        } else return null; // references, unknown calls, lvalues, and captures
+        if (values.size > 8) return null;
+      }
+      return [...values].every(value => PERL_NAME.test(value)) ? [...values].sort() : null;
+    };
+    for (const { node, ctx } of this.stringEvals) {
+      const scalar = this.requireInterpolation(node), values = scalar && finiteValues(scalar, node, ctx);
+      if (values) {
+        for (const value of values) this.facts.loads.push({ ...this.context(node, ctx), id: `${this.file}:load${this.facts.loads.length}`,
+          operation: "require", targetKind: "module", target: known(value), arguments: { kind: "empty" }, trapped: true,
+          conditional: ctx.conditional || values.length > 1 });
+      } else {
+        this.diagnostic("PERL_DYNAMIC_EVAL", "String eval is not statically expanded", node);
+        this.facts.mutations.push({ ...this.context(node, ctx), names: unknown("string eval can change package bindings") });
+        this.facts.includeEffects.push({ ...this.context(node, ctx), operation: "unknown", directories: unknown("string eval can change load state"), affectsLoaded: true, affectsCwd: true });
+        for (const binding of this.facts.bindings) if (binding.kind === "lexical-coderef"
+          && this.binding(binding.name, ctx.scope.id, node.startIndex)?.id === binding.id) {
+          binding.invalidations.push({ at: node.startIndex, reason: "mutation" });
+        }
+      }
+    }
+    for (const { fact, node, scalar, ctx } of this.computedParents) {
+      const values = finiteValues(scalar, node, ctx);
+      if (!values) continue;
+      fact.unknownMutation = false;
+      if (values.length === 1) fact.parents = known(values);
+      else fact.parentAlternatives = values.map(value => [value]);
     }
   }
 
