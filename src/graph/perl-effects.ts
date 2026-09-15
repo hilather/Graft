@@ -8,16 +8,18 @@ interface Effect<T> { file: string; fact: T }
 interface Body { file: string; scope: string }
 interface Dispatch { scopes: string[]; dynamic: boolean }
 
-export function createPerlLoadEffectResolver(files: ReadonlyMap<string, PerlFileFacts>, projectOf: (file: string) => string) {
+export function createPerlLoadEffectResolver(files: ReadonlyMap<string, PerlFileFacts>, projectOf: (file: string) => string,
+  additionalLoadCandidates?: (file: string, load: PerlLoad) => readonly string[]) {
   return createPerlSourceEffectResolver(files, projectOf, (facts) => facts.includeEffects,
-    (load): PerlIncludeEffect => ({ ...load, operation: "unknown", directories: { kind: "unknown", reason: "called routine has a computed load target" }, affectsLoaded: true, affectsCwd: true }));
+    (load): PerlIncludeEffect => ({ ...load, operation: "unknown", directories: { kind: "unknown", reason: "called routine has a computed load target" }, affectsLoaded: true, affectsCwd: true }), undefined, additionalLoadCandidates);
 }
 
 export function createPerlSymbolEffectResolver(files: ReadonlyMap<string, PerlFileFacts>, projectOf: (file: string) => string, environment?: PerlModuleEnvironment) {
-  return createPerlSourceEffectResolver(files, projectOf, (facts) => facts.mutations, undefined, true, environment);
+  return createPerlSourceEffectResolver(files, projectOf, (facts) => facts.mutations, undefined, environment);
 }
 
-function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMap<string, PerlFileFacts>, identifyProject: (file: string) => string, select: (facts: PerlFileFacts) => readonly T[], unknownLoad?: (load: PerlLoad) => T, boundedInitialization = false, symbolEnvironment?: PerlModuleEnvironment) {
+function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMap<string, PerlFileFacts>, identifyProject: (file: string) => string, select: (facts: PerlFileFacts) => readonly T[], unknownLoad?: (load: PerlLoad) => T, symbolEnvironment?: PerlModuleEnvironment,
+  additionalLoadCandidates?: (file: string, load: PerlLoad) => readonly string[]) {
   const projectByFile = new Map([...files.keys()].map((file) => [file, identifyProject(file)]));
   const projectOf = (file: string): string => projectByFile.get(file)!;
   const projectFiles = new Map<string, string[]>();
@@ -176,14 +178,19 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
     const request = load.targetKind === "module" ? load.target.value.replaceAll("::", "/") + ".pm" : load.target.value.replace(/^\.\//, "");
     // All matching roots are retained. These candidates can only invalidate
     // state; the ordered module resolver still decides actual load identity.
-    const result = (projectFiles.get(projectOf(file)) ?? []).filter((candidate) => request.includes("..") || candidate === request || candidate.endsWith(`/${request}`) || request.endsWith(`/${candidate}`));
+    const matching = (projectFiles.get(projectOf(file)) ?? []).filter((candidate) => request.includes("..") || candidate === request || candidate.endsWith(`/${request}`) || request.endsWith(`/${candidate}`));
+    const resolved = symbolEnvironment?.loads.get(load.id);
+    const result = [...new Set([...matching, ...additionalLoadCandidates?.(file, load) ?? [], ...resolved ? [resolved.file] : []])]
+      .filter(candidate => files.has(candidate) && projectOf(candidate) === projectOf(file));
     loadMemo.set(load, result);
     return result;
   };
-  const summarize = (file: string, seeds: string[], dynamic = false, loadedFiles: string[] = []): Effect<T>[] => {
+  const summarize = (file: string, seeds: string[], dynamic = false, loadedFiles: string[] = [], observedLoads?: Set<string>): Effect<T>[] => {
     const complete = closedProjects.has(projectOf(file)) ? projectEffects.get(projectOf(file)) ?? [] : undefined;
+    const unknownFiles = (owner: string) => { if (observedLoads) for (const possible of projectFiles.get(projectOf(owner)) ?? []) observedLoads.add(possible); };
     // Dynamic dispatch already admits every effect in a closed project.
     // Further graph traversal can only rediscover those same invalidations.
+    if (dynamic) unknownFiles(file);
     if (dynamic && complete) return complete;
     const effects = new Set<Effect<T>>(dynamic ? projectEffects.get(projectOf(file)) : []);
     const pending = [...seeds], seen = new Set<string>();
@@ -193,15 +200,29 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
         const loaded = pendingFiles.pop()!;
         if (seenFiles.has(loaded)) continue;
         seenFiles.add(loaded);
+        observedLoads?.add(loaded);
         const facts = files.get(loaded)!;
-        // Deferred loaders retain a conservative union of possible module
-        // effects, including dependencies and initialization calls. Pure source
-        // modules do not acquire invented eval/%INC/CWD mutations.
+        // Requiring a module executes its initializer. Deferred routines only
+        // contribute effects when reached through a call or an import hook.
         const initialized = (fact: PerlContext) => ["compile", "BEGIN", "UNITCHECK"].includes(fact.phase) || perlFileExecution(facts, fact.scopeId);
-        for (const fact of select(facts)) if (!boundedInitialization || initialized(fact)) effects.add({ file: loaded, fact });
-        for (const load of facts.loads) if (!boundedInitialization || initialized(load)) pendingFiles.push(...loadCandidates(loaded, load));
-        for (const call of facts.calls) if (boundedInitialization ? initialized(call) : ["compile", "BEGIN", "UNITCHECK"].includes(call.phase) || perlFileExecution(facts, call.scopeId)) {
+        for (const fact of select(facts)) if (initialized(fact)) effects.add({ file: loaded, fact });
+        for (const load of facts.loads) if (initialized(load)) {
+          const candidates = loadCandidates(loaded, load);
+          pendingFiles.push(...candidates);
+          if (load.target.kind === "unknown") {
+            unknownFiles(loaded);
+            if (unknownLoad) effects.add({ file: loaded, fact: unknownLoad(load) });
+            else {
+              if (complete) return complete;
+              for (const effect of projectEffects.get(projectOf(loaded)) ?? []) effects.add(effect);
+            }
+          } else if (load.operation !== "require" && load.arguments.kind !== "empty") {
+            for (const candidate of candidates) pending.push(...importSeeds(candidate, load.target.value, load.operation === "no" ? "unimport" : "import"));
+          }
+        }
+        for (const call of facts.calls) if (initialized(call)) {
           const next = targets(loaded, call);
+          if (next.dynamic) unknownFiles(loaded);
           if (next.dynamic && complete) return complete;
           pending.push(...next.scopes, ...callbacks(loaded, call));
           if (next.dynamic) for (const effect of projectEffects.get(projectOf(loaded)) ?? []) effects.add(effect);
@@ -215,12 +236,17 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
       const body = bodies.get(scope);
       if (!body) continue;
       if (unknownDispatchScopes.has(scope)) {
+        unknownFiles(body.file);
         if (complete) return complete;
         for (const effect of projectEffects.get(projectOf(body.file)) ?? []) effects.add(effect);
       }
-      for (const load of scopeLoads.get(scope) ?? []) pendingFiles.push(...loadCandidates(body.file, load));
+      for (const load of scopeLoads.get(scope) ?? []) {
+        pendingFiles.push(...loadCandidates(body.file, load));
+        if (load.target.kind === "unknown") unknownFiles(body.file);
+      }
       for (const call of calls.get(scope) ?? []) {
         const next = targets(body.file, call);
+        if (next.dynamic) unknownFiles(body.file);
         if (next.dynamic && complete) return complete;
         pending.push(...next.scopes, ...callbacks(body.file, call));
         if (next.dynamic) for (const effect of projectEffects.get(projectOf(body.file)) ?? []) effects.add(effect);
@@ -256,16 +282,16 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
   };
   const importMemo = new Map<string, Effect<T>[]>();
   const importScopeMemo = new Map<string, string[]>();
-  const forImport = (file: string, packageName: string, operation: "import" | "unimport"): Effect<T>[] => {
+  const importSeeds = (file: string, packageName: string, operation: "import" | "unimport"): string[] => {
     const memoKey = key(file, `${packageName}::${operation}`);
-    const cached = importMemo.get(memoKey);
+    const cached = importScopeMemo.get(memoKey);
     if (cached) return cached;
     const pending = [packageName], seen = new Set<string>(), seeds: string[] = [];
     while (pending.length) {
       const name = pending.pop()!;
       if (seen.has(name)) continue;
       seen.add(name);
-      const own = names.get(key(file, `${name}::${operation}`)) ?? [];
+      const own = namedBodies(file, `${name}::${operation}`);
       seeds.push(...own);
       if (own.length) continue;
       for (const [owner, facts] of files) if (projectOf(owner) === projectOf(file)) for (const inheritance of facts.inheritance) if (inheritance.packageName === name) {
@@ -273,27 +299,52 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
         else seeds.push(...names.get(key(file, operation)) ?? []);
       }
     }
-    const result = summarize(file, seeds);
     importScopeMemo.set(memoKey, seeds);
+    return seeds;
+  };
+  const forImport = (file: string, packageName: string, operation: "import" | "unimport"): Effect<T>[] => {
+    const memoKey = key(file, `${packageName}::${operation}`);
+    const cached = importMemo.get(memoKey);
+    if (cached) return cached;
+    const result = summarize(file, importSeeds(file, packageName, operation));
     importMemo.set(memoKey, result);
     return result;
   };
   const lifecycleMemo = new Map<string, Effect<T>[]>();
-  const forLifecycle = (file: string): Effect<T>[] => {
-    const cached = lifecycleMemo.get(file);
+  const lifecycleScopes = new Map([...files].map(([file, facts]) => [file, [...new Set([...select(facts), ...facts.calls, ...facts.loads]
+    .filter(fact => fact.phase === "CHECK" || fact.phase === "INIT").map(fact => perlExecutionScope(facts, fact.scopeId)))]]));
+  const lifecycleProjects = new Set([...lifecycleScopes].filter(([, scopes]) => scopes.length).map(([file]) => projectOf(file)));
+  const lifecycleResults = new Map<string, Effect<T>[]>();
+  const forLifecycle = (file: string, loaded = true): Effect<T>[] => {
+    if (!lifecycleProjects.size || closedProjects.has(projectOf(file)) && !lifecycleProjects.has(projectOf(file))) return [];
+    const memoKey = `${file}\0${loaded}`;
+    const cached = lifecycleMemo.get(memoKey);
     if (cached) return cached;
-    const lifecycle = (phase: string) => phase === "CHECK" || phase === "INIT";
-    const scopes = new Set<string>(), pending = [file], seen = new Set<string>();
-    while (pending.length) {
-      const current = pending.pop()!;
-      if (seen.has(current)) continue;
-      seen.add(current);
-      const facts = files.get(current)!;
-      for (const fact of [...select(facts), ...facts.calls, ...facts.loads]) if (lifecycle(fact.phase)) scopes.add(perlExecutionScope(facts, fact.scopeId));
-      if (boundedInitialization) for (const load of facts.loads) if (load.phase === "compile" || load.phase === "BEGIN") pending.push(...loadCandidates(current, load));
+    const scopes = new Set<string>(), compiledFiles = new Set([file]), seeds: string[] = [], loadedFiles: string[] = [];
+    const facts = files.get(file)!;
+    const compiling = (fact: PerlContext) => ["compile", "BEGIN", "UNITCHECK"].includes(fact.phase) || loaded && perlFileExecution(facts, fact.scopeId);
+    let dynamic = false;
+    for (const call of facts.calls) if (compiling(call)) {
+      const target = targets(file, call);
+      dynamic ||= target.dynamic;
+      seeds.push(...target.scopes, ...callbacks(file, call));
     }
-    const result = summarize(file, [...scopes]);
-    lifecycleMemo.set(file, result);
+    for (const load of facts.loads) if (compiling(load)) {
+      const candidates = loadCandidates(file, load);
+      loadedFiles.push(...candidates);
+      if (load.target.kind === "unknown") dynamic = true;
+      else if (load.operation !== "require" && load.arguments.kind !== "empty") for (const candidate of candidates) seeds.push(...importSeeds(candidate, load.target.value, load.operation === "no" ? "unimport" : "import"));
+    }
+    // A BEGIN call can require another module through an ordinary routine.
+    // Record those loaded files before collecting their CHECK/INIT blocks.
+    summarize(file, seeds, dynamic, loadedFiles, compiledFiles);
+    for (const current of compiledFiles) for (const scope of lifecycleScopes.get(current) ?? []) scopes.add(scope);
+    // Many entries reach the same CHECK/INIT set. Share its effect closure
+    // rather than traversing those bodies again for every loading file.
+    const scopeKey = `${projectOf(file)}\0${[...scopes].sort().join("\0")}`;
+    let result = lifecycleResults.get(scopeKey);
+    if (!result) { result = summarize(file, [...scopes]); lifecycleResults.set(scopeKey, result); }
+    lifecycleMemo.set(memoKey, result);
     return result;
   };
   const loadedFileMemo = new Map<string, Effect<T>[]>();

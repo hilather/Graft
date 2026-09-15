@@ -157,7 +157,12 @@ export function buildPerlModuleEnvironment(files: ReadonlyMap<string, PerlFileFa
   for (const project of new Map([...projects.values()].map((project) => [project.root, project])).values()) if (project.confidence === "extracted") {
     for (const file of fileNames) if ([...project.includeRoots, ...Object.values(project.pathMappings ?? {})].some((root) => file === root || inside(file, root))) effectProjects.set(effectProject(project.root), effectProject(projects.get(file)!.root));
   }
-  const effects = createPerlLoadEffectResolver(files, (file) => effectProject(projects.get(file)!.root));
+  const effects = createPerlLoadEffectResolver(files, (file) => effectProject(projects.get(file)!.root), (file, load) => {
+    if (load.target.kind !== "known" || load.targetKind !== "file") return [];
+    const project = projects.get(file)!;
+    const path = relativeLiteral(load.target.value, project.analysisCwd, graphRoot, project.pathMappings);
+    return path === null ? [] : [path];
+  });
   const invalidate = (state: SearchState, effects: readonly PerlIncludeEffect[]) => {
     if (effects.length) state.known = false;
     if (effects.some((effect) => effect.affectsCwd)) state.cwd = undefined;
@@ -174,7 +179,7 @@ export function buildPerlModuleEnvironment(files: ReadonlyMap<string, PerlFileFa
     const entry = active.size === 0;
     active.add(file);
     const facts = files.get(file)!;
-    if (!state.runtimeStarted) state.pendingLifecycle.push(...effects.forLifecycle(file).map((effect) => effect.fact));
+    if (!state.runtimeStarted) state.pendingLifecycle.push(...effects.forLifecycle(file, !entry).map((effect) => effect.fact));
     for (const event of events.get(file) ?? []) {
       const fact = event.fact;
       // CHECK/INIT belong to the main program's phase transition. A module's
