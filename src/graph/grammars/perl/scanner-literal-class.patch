@@ -1,0 +1,49 @@
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -1237,6 +1237,46 @@
+     }
+ 
+     if (!tsp_intuit_more(buf, n)) {
++      /* A literal character class can contain the quote's paired delimiters,
++       * e.g. m{[{}]}. Returning only '[' sends the following '{' through the
++       * subscript heuristic again, where '{}' is mistaken for a hash lookup
++       * and consumed without updating the quote nesting count. Consume a
++       * completely observed, non-interpolating class as ordinary regex content
++       * instead. Complex classes retain the existing interpolation path.
++       *
++       * Only advance MARK_END after proving that this entire class stays inside
++       * the innermost quote. Perl balances quote delimiters before interpreting
++       * regex contents, including delimiters inside character classes. */
++      bool literal_class = open == '[' && n > 2 && buf[n - 1] == ']' &&
++        buf[1] != ']' && !(buf[1] == '^' && buf[2] == ']') &&
++        valid_symbols[TOKEN_QQ_STRING_CONTENT] && state->quotes.size;
++      TSPQuote *quote = state->quotes.size ? array_back(&state->quotes) : NULL;
++      int32_t nested = quote ? quote->count : 0;
++      if (literal_class) {
++        for (int i = 0; i < n; i++) {
++          int32_t ch = (unsigned char)buf[i];
++          if (ch == '$' || ch == '@' || ch == '\\' || ch == 0x7f ||
++              ch == '\n' || ch == '\r' || (i > 0 && ch == '[')) {
++            literal_class = false;
++            break;
++          }
++          if (quote->open && ch == quote->open) {
++            nested++;
++          } else if (ch == quote->close) {
++            if (!nested) {
++              literal_class = false;
++              break;
++            }
++            nested--;
++          }
++        }
++      }
++      if (literal_class) {
++        quote->count = nested;
++        ADVANCE_C;  /* consume the observed closing ']' */
++        MARK_END;
++        TOKEN(TOKEN_QQ_STRING_CONTENT);
++      }
+       /* If this class/quantifier opener is also the quote's own delimiter
+        * (`m{ \d{2} }`, `m[ [abc] ]`), it opens a nested level — bump the count
+        * so the matching inner close doesn't terminate the quote early. The

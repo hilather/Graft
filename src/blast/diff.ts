@@ -131,6 +131,8 @@ function diffFiles(dir: string, range: string[]): ChangedFile[] | null {
     "--unified=0",
     "--no-color",
     "--no-ext-diff",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
     "--find-renames",
     ...range,
     "--",

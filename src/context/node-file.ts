@@ -323,11 +323,11 @@ export function readNodes(dir: string): ParsedNode[] {
   if (!existsSync(dir)) return [];
   const fileCardStems = rootFileCardStems(dir);
   const out: ParsedNode[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (!entry.endsWith(".md") || entry === "INDEX.md") continue;
-    const parsed = matter(readFileSync(join(dir, entry), "utf8"));
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".md") || entry.name === "INDEX.md") continue;
+    const parsed = matter(readFileSync(join(dir, entry.name), "utf8"));
     const fm = parsed.data as Record<string, unknown>;
-    const fallbackSlug = entry.replace(/\.md$/, "");
+    const fallbackSlug = entry.name.replace(/\.md$/, "");
     if (isRootFileCard(fallbackSlug, fm, parsed.content, fileCardStems)) continue;
     out.push({
       slug: String(fm.slug ?? fallbackSlug),
@@ -345,9 +345,9 @@ export function readNodes(dir: string): ParsedNode[] {
 export function existingNodeSlugs(dir: string): Set<string> {
   if (!existsSync(dir)) return new Set();
   return new Set(
-    readdirSync(dir)
-      .filter((e) => e.endsWith(".md") && e !== "INDEX.md")
-      .map((e) => e.replace(/\.md$/, "")),
+    readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith(".md") && e.name !== "INDEX.md")
+      .map((e) => e.name.replace(/\.md$/, "")),
   );
 }
 

@@ -14,7 +14,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { hooksShim } from '../src/claude/shim-template.js';
-import { tmpRepo } from './helpers.js';
+import { homeEnv, tmpRepo } from './helpers.js';
 
 /** A fake installed @nanonets/graft whose hooks entry records that it ran. */
 function fakeInstall(root: string, name: string, version: string): string {
@@ -36,10 +36,19 @@ function fakeInstall(root: string, name: string, version: string): string {
 function runShim(root: string, bakedDir: string, projectDir: string): string | null {
   const shimPath = join(root, 'graft-hooks.cjs');
   const marker = join(root, 'loaded.txt');
+  const preload = join(root, 'fixture-runtime.cjs');
+  // The developer's real global install is another valid candidate. Give the
+  // unmodified shim an isolated runtime prefix so these version comparisons
+  // exercise only the installs this fixture declares.
+  writeFileSync(preload, `Object.defineProperty(process, 'execPath', { value: ${JSON.stringify(join(root, 'runtime', 'bin', 'node'))} });\n`);
   writeFileSync(shimPath, hooksShim(bakedDir));
-  const res = spawnSync(process.execPath, [shimPath, 'session-start'], {
+  const env = { ...homeEnv(root), MARKER: marker, CLAUDE_PROJECT_DIR: projectDir, NODE_PATH: '' };
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') env[key as keyof typeof env] = '';
+  const res = spawnSync(process.execPath, ['--require', preload, shimPath, 'session-start'], {
     encoding: 'utf8',
-    env: { ...process.env, MARKER: marker, CLAUDE_PROJECT_DIR: projectDir },
+    cwd: projectDir,
+    env,
+    timeout: 15_000,
   });
   assert.equal(res.status, 0, `shim exited ${res.status}: ${res.stderr}`);
   return existsSync(marker) ? readFileSync(marker, 'utf8') : null;
@@ -80,4 +89,12 @@ test('no candidate at all exits quietly — a hook must never fail the session',
   const root = tmpRepo('shim-none');
   mkdirSync(join(root, 'project'), { recursive: true });
   assert.equal(runShim(root, join(root, 'nowhere'), join(root, 'project')), null);
+});
+
+test('the runtime-prefix global candidate participates in version selection', () => {
+  const root = tmpRepo('shim-runtime');
+  const baked = fakeInstall(root, 'baked', '0.9.1');
+  mkdirSync(join(root, 'project'), { recursive: true });
+  fakeInstall(join(root, 'runtime', 'lib', 'node_modules', '@nanonets'), 'graft', '0.12.0');
+  assert.equal(runShim(root, baked, join(root, 'project')), '0.12.0');
 });

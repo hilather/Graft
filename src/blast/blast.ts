@@ -15,6 +15,7 @@
  */
 import { impactOfMany, type EdgeHit } from "../graph/traverse.js";
 import type { GraphV1, NodeV1 } from "../graph/types.js";
+import { isPerlTestPath } from "../graph/test-path.js";
 import { dirLabel, moduleIndex, parentDir, shortLabel, type ModuleIndex } from "./modules.js";
 import type { ChangedFile } from "./diff.js";
 import type { Owner, Reviewer } from "./owners.js";
@@ -184,6 +185,7 @@ export function blastRadius(
 ): BlastReport {
   const fileNodes = new Map<string, NodeV1>();
   for (const n of graph.nodes) if (n.kind === "file") fileNodes.set(n.path, n);
+  const isTest = (path: string) => TEST_PATH.test(path) || isPerlTestPath(path, fileNodes.get(path)?.language);
 
   const seeds: Seed[] = [];
   const unindexed: string[] = [];
@@ -252,7 +254,7 @@ export function blastRadius(
   const impacted = [...merged.values()].map((m) => m.hit);
   const origins = new Map([...merged].map(([id, m]) => [id, m.from]));
   const index = opts.modules ?? emptyIndex();
-  const grouped = groupByModule(impacted, changed, origins, index);
+  const grouped = groupByModule(impacted, changed, origins, index, isTest);
 
   return {
     basis,
@@ -264,7 +266,7 @@ export function blastRadius(
     impacted,
     modules: grouped.modules,
     testModules: grouped.testModules,
-    areas: changedAreas(graph, changed, seedNodes, index, grouped.modules),
+    areas: changedAreas(graph, changed, seedNodes, index, grouped.modules, isTest),
   };
 }
 
@@ -283,8 +285,9 @@ function changedAreas(
   seedNodes: Map<string, NodeV1[]>,
   index: ModuleIndex,
   modules: ImpactedModule[],
+  isTest: (path: string) => boolean,
 ): ChangedArea[] {
-  const changedTests = new Set(changed.filter((c) => TEST_PATH.test(c.path)).map((c) => c.path));
+  const changedTests = new Set(changed.filter((c) => isTest(c.path)).map((c) => c.path));
   const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
   /** How many edges point AT each node — how central it is in the graph. */
   const inDegree = new Map<string, number>();
@@ -293,7 +296,7 @@ function changedAreas(
   const incoming = new Map<string, Set<string>>();
   for (const e of graph.edges) {
     const path = nodeById.get(e.source)?.path;
-    if (!path || !TEST_PATH.test(path)) continue;
+    if (!path || !isTest(path)) continue;
     const at = incoming.get(e.target) ?? new Set<string>();
     at.add(path);
     incoming.set(e.target, at);
@@ -309,7 +312,7 @@ function changedAreas(
   for (const path of seedNodes.keys()) {
     // A changed test file is the signal, not the source of a blast radius. Drawing
     // it as an area would put "your tests changed" on both sides of the arrow.
-    if (TEST_PATH.test(path)) continue;
+    if (isTest(path)) continue;
     const dir = dirLabel(path);
     groups.set(dir, [...(groups.get(dir) ?? []), path]);
   }
@@ -453,6 +456,7 @@ function groupByModule(
   changed: ChangedFile[],
   origins: Map<string, Set<string>>,
   modules: ModuleIndex,
+  isTest: (path: string) => boolean,
 ): { modules: ImpactedModule[]; testModules: ImpactedModule[] } {
   const changedPaths = new Set(changed.map((c) => c.path));
   const byKey = new Map<string, ImpactedModule>();
@@ -497,8 +501,8 @@ function groupByModule(
     b.symbols.length - a.symbols.length || a.label.localeCompare(b.label);
   const all = [...byKey.values()];
   return {
-    modules: all.filter((m) => !isTestOnly(m)).sort(bySize),
-    testModules: all.filter(isTestOnly).sort(bySize),
+    modules: all.filter((m) => !isTestOnly(m, isTest)).sort(bySize),
+    testModules: all.filter((m) => isTestOnly(m, isTest)).sort(bySize),
   };
 }
 
@@ -536,6 +540,6 @@ function coarsen(groups: Map<string, string[]>, max: number): void {
 const TEST_PATH = /(^|\/)(tests?|specs?|__tests__)\/|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rb)$/i;
 
 /** True when every file in the module is a test file. */
-function isTestOnly(mod: ImpactedModule): boolean {
-  return mod.files.length > 0 && mod.files.every((f) => TEST_PATH.test(f));
+function isTestOnly(mod: ImpactedModule, isTest: (path: string) => boolean): boolean {
+  return mod.files.length > 0 && mod.files.every(isTest);
 }

@@ -14,8 +14,9 @@
  * `summary` when present (after `graft build --deep`), else its deterministic
  * `signature`, so cards are useful even in a $0 structure-only build.
  */
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createHash } from "node:crypto";
 import { relPosix } from "../util/paths.js";
 import matter from "gray-matter";
 import type { GraphV1, NodeV1 } from "./types.js";
@@ -26,6 +27,7 @@ const INDEX_FILE = "INDEX.md";
 /** Where a root-level file card goes when `graft/<stem>.md` is already a concept
  * node (same stem as a slug — Laravel `server.php` vs a "Server" concept). */
 const ROOT_CARD_DIR = "_root";
+const CARD_MARKER = "<!-- graft:source-card -->";
 
 export interface CardFileInfo {
   /** Card path relative to the context dir, e.g. "src/ai/providers.md". */
@@ -61,6 +63,62 @@ function cardPathFor(outDir: string, sourcePath: string): string {
   if (sourcePath.includes("/")) return primary;
   if (isConceptNodeFile(primary)) return join(outDir, ROOT_CARD_DIR, md);
   return primary;
+}
+
+function isSourceCard(path: string): boolean {
+  if (isConceptNodeFile(path)) return false;
+  const text = readFileSync(path, "utf8");
+  if (text.includes(CARD_MARKER)) return true;
+  // Recognize the previous generated format for migration and root-card
+  // pruning. Ordinary Markdown and concept prose are not owned projections.
+  return /^# \S+(?: · \[\[.*\]\])?\r?\n/.test(text) && (/^- .+ · \w+ · L\d+-L\d+/m.test(text) || /\n_No extracted symbols in this file\._\r?\n?$/.test(text));
+}
+
+/** Allocate the complete roster before writing. Portable keys protect files
+ * whose names differ only by case, including on a case-sensitive host. */
+function allocateCardPaths(outDir: string, sources: string[]): Map<string, string> {
+  const key = (path: string) => path.normalize("NFC").toLowerCase();
+  const parents = (path: string): string[] => {
+    const result: string[] = [];
+    for (let slash = path.indexOf("/"); slash !== -1; slash = path.indexOf("/", slash + 1)) result.push(path.slice(0, slash));
+    return result;
+  };
+  const existing = listMarkdownFiles(outDir);
+  const protectedPaths = new Set(existing.filter((path) => !isSourceCard(path)).map((path) => key(relPosix(outDir, path))));
+  protectedPaths.add(key(INDEX_FILE));
+  const preferred = new Map(sources.map((source) => [source, relPosix(outDir, cardPathFor(outDir, source))]));
+  const counts = new Map<string, number>();
+  for (const path of preferred.values()) counts.set(key(path), (counts.get(key(path)) ?? 0) + 1);
+  const candidates = new Map([...preferred].map(([source, path]) => [source, counts.get(key(path))! > 1 ? (path.startsWith(`${ROOT_CARD_DIR}/`) && !source.includes("/") ? `${ROOT_CARD_DIR}/` : "") + source + ".md" : path]));
+  const candidateCounts = new Map<string, number>();
+  const candidateParents = new Set<string>();
+  for (const path of candidates.values()) {
+    const normalized = key(path);
+    candidateCounts.set(normalized, (candidateCounts.get(normalized) ?? 0) + 1);
+    for (const parent of parents(normalized)) candidateParents.add(parent);
+  }
+  const claimed = new Set(protectedPaths);
+  for (const dir of [CACHE_DIR, GRAPH_DIR]) claimed.add(key(dir));
+  const claimedParents = new Set([...claimed].flatMap(parents));
+  const result = new Map<string, string>();
+  const conflicts = (path: string): boolean => {
+    const normalized = key(path);
+    return claimed.has(normalized) || claimedParents.has(normalized) || parents(normalized).some((parent) => claimed.has(parent));
+  };
+  for (const source of [...sources].sort()) {
+    let path = candidates.get(source)!;
+    const collision = candidateCounts.get(key(path))! > 1 || candidateParents.has(key(path));
+    if (collision || conflicts(path)) {
+      const hash = createHash("sha256").update(source).digest("hex").slice(0, 16);
+      let ordinal = 0;
+      do { path = `${ROOT_CARD_DIR}/source-${hash}${ordinal ? `-${ordinal}` : ""}.md`; ordinal++; } while (conflicts(path));
+    }
+    const normalized = key(path);
+    claimed.add(normalized);
+    for (const parent of parents(normalized)) claimedParents.add(parent);
+    result.set(source, join(outDir, path));
+  }
+  return result;
 }
 
 /** Starting line of an "L43-L55" span, for stable ordering (0 if unparseable). */
@@ -101,7 +159,7 @@ function renderCard(
     .map((s) => `[[${s}]]`)
     .join(" ");
   const head = uplinks ? `# ${sourcePath} · ${uplinks}` : `# ${sourcePath}`;
-  const lines: string[] = [head, ""];
+  const lines: string[] = [head, "", CARD_MARKER, ""];
 
   const fileSummary = fileNode ? oneLiner(fileNode) : "";
   if (fileSummary) lines.push(fileSummary, "");
@@ -112,14 +170,14 @@ function renderCard(
   for (const n of sorted) {
     const desc = oneLiner(n);
     const tail = desc ? ` — ${desc}` : "";
-    lines.push(`- ${n.name} · ${n.kind} · ${n.span}${tail}`);
+    lines.push(`- ${n.qualified_name ?? n.name} · ${n.kind} · ${n.span}${tail}`);
   }
   if (sorted.length === 0) lines.push("_No extracted symbols in this file._");
   return lines.join("\n") + "\n";
 }
 
-/** Every existing card file (`.md` inside subdirs of outDir; not concept nodes). */
-function listExistingCards(outDir: string): string[] {
+/** Markdown outside the private caches, including root cards and concepts. */
+function listMarkdownFiles(outDir: string): string[] {
   const out: string[] = [];
   const walk = (dir: string): void => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -131,13 +189,7 @@ function listExistingCards(outDir: string): string[] {
       }
     }
   };
-  for (const e of readdirSync(outDir, { withFileTypes: true })) {
-    // Concept nodes and INDEX.md are top-level files — skip. Cards live in
-    // subdirs (`src/…`, and `_root/` when a root card would collide with a concept).
-    if (e.isDirectory() && e.name !== CACHE_DIR && e.name !== GRAPH_DIR) {
-      walk(join(outDir, e.name));
-    }
-  }
+  if (existsSync(outDir)) walk(outDir);
   return out;
 }
 
@@ -179,20 +231,21 @@ export function writeCards(graph: GraphV1, outDir: string): CardStats {
   const concepts = conceptsByPath(outDir);
   const written = new Set<string>();
   const files: CardFileInfo[] = [];
+  const paths = allocateCardPaths(outDir, [...byPath.keys()]);
 
   for (const [sourcePath, group] of byPath) {
     const fileNode = group.find((n) => n.kind === "file");
     const symbols = group.filter((n) => n.kind !== "file");
-    const cardPath = cardPathFor(outDir, sourcePath);
+    const cardPath = paths.get(sourcePath)!;
     mkdirSync(dirname(cardPath), { recursive: true });
     writeFileSync(cardPath, renderCard(sourcePath, fileNode, symbols, concepts.get(sourcePath) ?? []));
-    written.add(cardPath);
+    written.add(realpathSync(cardPath));
     files.push({ card: relPosix(outDir, cardPath), path: sourcePath, symbols: symbols.length });
   }
 
   let pruned = 0;
-  for (const existing of listExistingCards(outDir)) {
-    if (!written.has(existing)) {
+  for (const existing of listMarkdownFiles(outDir)) {
+    if (!written.has(realpathSync(existing)) && relPosix(outDir, existing) !== INDEX_FILE && isSourceCard(existing)) {
       rmSync(existing);
       pruned++;
     }
@@ -245,6 +298,16 @@ export function writeIndex(outDir: string, files: CardFileInfo[]): void {
       "`grep` a symbol or `find`/`ls` a filename under `graft/` to land on the card for that file.",
       "",
     );
+    const relocated = files.filter((file) => file.card !== file.path.replace(/\.[^./]+$/, "") + ".md");
+    if (relocated.length) {
+      lines.push("### Card paths", "", "These files use distinct card paths to preserve colliding names or existing prose.", "");
+      for (const file of relocated) {
+        const label = file.path.replace(/[\\[\]]/g, "\\$&");
+        const href = file.card.split("/").map((part) => encodeURIComponent(part).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)).join("/");
+        lines.push(`- [${label}](${href})`);
+      }
+      lines.push("");
+    }
   }
 
   writeFileSync(join(outDir, INDEX_FILE), lines.join("\n"));
@@ -287,9 +350,9 @@ export function writeCovers(graph: GraphV1, outDir: string): number {
   }
 
   let enriched = 0;
-  for (const entry of readdirSync(outDir)) {
-    if (!entry.endsWith(".md") || entry === INDEX_FILE) continue;
-    const full = join(outDir, entry);
+  for (const entry of readdirSync(outDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".md") || entry.name === INDEX_FILE) continue;
+    const full = join(outDir, entry.name);
     const parsed = matter(readFileSync(full, "utf8"));
     // Root-level file cards have no concept slug; stamping `covers: []` onto
     // them made readNodes treat them as concept nodes (#261).
@@ -301,7 +364,7 @@ export function writeCovers(graph: GraphV1, outDir: string): number {
     const covers: CoverRef[] = [];
     for (const path of [...new Set(sources.map((s) => s.path ?? ""))].sort()) {
       for (const n of symbolsByPath.get(path) ?? []) {
-        covers.push({ symbol: n.name, kind: n.kind, at: `${n.path}:${n.span}` });
+        covers.push({ symbol: n.qualified_name ?? n.name, kind: n.kind, at: `${n.path}:${n.span}` });
       }
     }
 

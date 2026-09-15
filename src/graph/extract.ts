@@ -19,6 +19,7 @@ import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
+import type { PerlFileFacts } from "./perl-types.js";
 
 export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "swift" | "php" | "r";
 
@@ -123,6 +124,9 @@ export interface RawEdge {
 }
 
 export interface ExtractResult {
+  languageData?: PerlFileFacts;
+  status?: "ok" | "partial" | "failed";
+  cacheable?: boolean;
   nodes: NodeV1[];
   rawEdges: RawEdge[];
 }

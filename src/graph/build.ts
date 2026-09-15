@@ -13,17 +13,20 @@
  * whole node set, so an incremental build's output is byte-identical to a cold
  * one — the invariant `test/graph-incremental.test.ts` pins down.
  */
-import { readFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
-import { walkDir } from "../ingest/fs.js";
-import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/node-file.js";
-import { extractFile, languageLabelOf, languageOf, type RawEdge } from "./extract.js";
-import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
-import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
+import { readFileSync, rmSync } from "node:fs";
+import { basename, dirname, resolve, join } from "node:path";
+import { contextDirFor, ensureGitignored, ensureSearchable, CACHE_DIR } from "../context/node-file.js";
+import type { RawEdge } from "./extract.js";
+import { SourceDispatcher } from "./source-dispatch.js";
+import type { PerlParserOptions } from "./perl-parser.js";
+import { buildPerlModuleEnvironment } from "./perl-modules.js";
+import { resolvePerlEdges } from "./perl-resolve.js";
+import { materializePerlFrameworks } from "./perl-frameworks.js";
+import { perlFileResult } from "./perl-extract.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
-import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
+import { writeJsonAtomic } from "../util/state.js";
 import {
   emptyExtractCache,
   readExtractCache,
@@ -32,7 +35,7 @@ import {
 } from "./extract-cache.js";
 import { writeFingerprint } from "./fingerprint.js";
 import { seedGraph, type SeedResult } from "./seed.js";
-import { filterByOnlyDirs, listSourceStats } from "./source-files.js";
+import { filterByOnlyDirs, collectSourceFiles, walkSourceTree } from "./source-files.js";
 import { resolveEdges, type GoModule } from "./resolve.js";
 import { enrichGraph, type EnrichStats } from "./enrich.js";
 import { readGraph, writeGraph, wiringPath } from "./write.js";
@@ -70,6 +73,8 @@ function applyMinSubstanceGuard(scopes: ScopeV1[], nodes: NodeV1[]): ScopeV1[] {
 }
 
 export interface GraphBuildOptions {
+  /** Internal parser lifecycle seam; not exposed as a CLI option. */
+  perlParser?: PerlParserOptions;
   /** Override the output dir (default: `<root>/.context`). */
   contextDir?: string;
   /** Replay unchanged files from the extraction cache instead of re-parsing them
@@ -102,6 +107,7 @@ export interface GraphBuildOptions {
 }
 
 export interface GraphBuildResult {
+  perl?: { files: number; partial: number; failed: number; diagnostics: number; workerStarts: number };
   contextDir: string;
   graphPath: string;
   /** Per-file wiring cards written (Tier-2 passive surface). */
@@ -157,13 +163,11 @@ export async function buildGraph(
   // Enumerate once: source extraction, scope discovery, and Go module
   // resolution must agree on the same Git-ignore-aware working-tree view —
   // including the repo's persisted directory and submodule choices.
-  const walked = walkDir(root, readIncludeDirs(root), {
-    followSubmodules: readFollowSubmodules(root),
-    followNestedRepos: readFollowNestedRepos(root),
-  });
+  const walked = walkSourceTree(root);
   const onlyDirs = opts.onlyDirs && opts.onlyDirs.length > 0 ? new Set(opts.onlyDirs) : undefined;
   const repoFiles = filterByOnlyDirs(walked, root, onlyDirs);
-  const files = listSourceStats(root, outDir, repoFiles);
+  const selection = collectSourceFiles(root, outDir, walked, onlyDirs);
+  const files = selection.files;
   const discoveredScopes = discoverScopes(root, repoFiles);
 
   const nodes: NodeV1[] = [];
@@ -173,6 +177,7 @@ export async function buildGraph(
    * javascript, or the banner claims a repo's JavaScript went unindexed. */
   const langs = new Set<string>();
   const errors: string[] = [];
+  for (const [file, message] of selection.readErrors) if (!selection.classifications.has(file)) errors.push(`${file}: SOURCE_CLASSIFICATION_UNAVAILABLE: ${message}`);
 
   // In a git worktree there is nothing to reuse *yet* — `graft/` is gitignored, so
   // git never checked it out — but the parent checkout's graph is one directory away.
@@ -190,105 +195,120 @@ export async function buildGraph(
   let parsed = 0;
   let reused = 0;
 
-  // Breadth tier: WASM grammars load asynchronously, so warm the ones this repo
-  // needs ONCE here (buildGraph is async) before the synchronous parse loop below
-  // can call extractGeneric. Depth-tier (native) grammars need no warmup.
-  await warmGenericGrammars(
-    new Set(files.map((f) => genericLangOf(f.abs)?.name).filter((n): n is string => !!n)),
-  );
-  // Container tier (.vue and friends) loads its wrapper grammars the same way,
-  // for the same reason: extractContainer runs inside the sync loop below.
-  await warmContainerGrammars(
-    new Set(files.map((f) => containerLangOf(f.abs)?.name).filter((n): n is string => !!n)),
-  );
-
-  files.forEach((f, i) => {
-    const rel = f.rel;
-    opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: rel });
-    // Depth tier (hand-written, native grammar) if a language claims the file;
-    // otherwise the breadth tier (generic tags.scm over a WASM grammar).
-    const lang = languageOf(f.abs);
-    // A container is neither tier: its wrapper grammar only locates the embedded
-    // block, which then goes to the depth-tier extractor. Checked before the
-    // breadth tier so a future grammar claiming .vue can't shadow it.
-    const container = lang ? null : containerLangOf(f.abs);
-    const generic = lang || container ? null : genericLangOf(f.abs);
-    const label = languageLabelOf(f.abs) ?? container?.name ?? generic?.name ?? "unknown";
-    const cached = priorExtract.files[rel];
-
-    // Every file is read and hashed, every build — only the *parse* is memoized.
-    // The tempting optimization is to trust the probe's `(size, mtimeMs)` and skip
-    // the read too, but then `graft build` inherits the probe's blind spot: on a
-    // filesystem with coarse mtime granularity, a same-length edit inside the same
-    // second is invisible, so `graft check` reports drift (it always re-hashes) and
-    // the `graft build` it tells you to run refuses to repair it — forever. A stat
-    // may decide whether a *query* bothers rebuilding; it may not decide what the
-    // rebuild itself looks at. Reading is ~0.05ms/file against the ~4.6ms parse
-    // this still skips.
-    let source: string | null;
-    try {
-      source = readSourceFile(f.abs);
-    } catch (err) {
-      const message = `${rel}: ${err instanceof Error ? err.message : String(err)}`;
-      errors.push(message);
-      // Record it anyway (with the stat we do have) so the freshness probe's
-      // fast path doesn't report this file as new on every single query.
-      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [], error: message };
-      return;
-    }
-    if (source === null) {
-      // Unsupported encoding (UTF-16BE) — a skip, never an error: recorded with
-      // an empty entry so the freshness probe doesn't treat it as new every run.
-      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [] };
-      return;
-    }
-
-    const hash = contentHash(source);
-    if (cached && hash === cached.hash) {
-      entries[rel] = { ...cached, size: f.size, mtimeMs: f.mtimeMs };
-      sources.set(rel, source);
-      reused++;
-      if (cached.error) {
-        errors.push(cached.error); // this file failed to parse last time too
-        return;
+  const dispatcher = new SourceDispatcher(opts.perlParser);
+  const perlEntries: Record<string, ExtractEntry> = Object.create(null);
+  const recordPerl = (rel: string, entry: ExtractEntry): void => {
+    if (!entry.languageData) return;
+    perlEntries[rel] = entry;
+  };
+  try {
+    await dispatcher.warm(selection.classifications.values());
+    for (const [i, f] of files.entries()) {
+      const rel = f.rel;
+      opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: rel });
+      const classification = selection.classifications.get(rel)!;
+      const classificationKey = `${classification.kind}:${classification.language}:${classification.kind === "perl" ? classification.mode : ""}`;
+      const unavailable = (message: string) => {
+        if (classification.kind !== "perl") {
+          errors.push(rel + ": " + message);
+          entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [], error: message, cacheable: false };
+          return;
+        }
+        const failure = perlFileResult(rel, "", [{ file: rel, code: "PERL_SOURCE_READ_FAILED", severity: "error", message }], "failed", false);
+        const entry = entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", classification: classificationKey, ...failure };
+        nodes.push(...failure.nodes); langs.add("perl"); recordPerl(rel, entry);
+      };
+      const selectionError = selection.readErrors.get(rel);
+      if (selectionError) { unavailable(selectionError); continue; }
+      const cached = priorExtract.files[rel];
+      // Always read/hash during a build; only parsing is memoized.
+      let source: string | null;
+      try {
+        source = readSourceFile(f.abs);
+      } catch (err) {
+        unavailable(err instanceof Error ? err.message : String(err));
+        continue;
       }
-      nodes.push(...cached.nodes);
-      rawEdges.push(...cached.rawEdges);
-      langs.add(label);
-      return;
+      if (source === null) {
+        entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [] };
+        continue;
+      }
+      const hash = contentHash(source);
+      if (cached && hash === cached.hash && cached.classification === classificationKey && cached.cacheable !== false) {
+        const entry = entries[rel] = { ...cached, size: f.size, mtimeMs: f.mtimeMs };
+        sources.set(rel, source);
+        reused++;
+        if (cached.error) {
+          errors.push(cached.error);
+          if (!cached.languageData) continue;
+        }
+        nodes.push(...cached.nodes);
+        rawEdges.push(...cached.rawEdges);
+        langs.add(classification.language);
+        recordPerl(rel, entry);
+        continue;
+      }
+      parsed++;
+      try {
+        const extraction = dispatcher.extract(rel, source, classification);
+        const extracted = extraction instanceof Promise ? await extraction : extraction;
+        nodes.push(...extracted.nodes);
+        rawEdges.push(...extracted.rawEdges);
+        sources.set(rel, source);
+        langs.add(classification.language);
+        const entry = entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, classification: classificationKey, ...extracted };
+        recordPerl(rel, entry);
+      } catch (err) {
+        const message = rel + ": parse failed — " + (err instanceof Error ? err.message : String(err));
+        errors.push(message);
+        entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, classification: classificationKey, nodes: [], rawEdges: [], error: message };
+      }
     }
-
-    parsed++;
-    try {
-      const { nodes: fileNodes, rawEdges: fileEdges } = lang
-        ? extractFile(rel, source, lang)
-        : container
-          ? extractContainer(rel, source, container)
-          : extractGeneric(rel, source, generic!.name);
-      nodes.push(...fileNodes);
-      rawEdges.push(...fileEdges);
-      sources.set(rel, source);
-      langs.add(label);
-      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: fileNodes, rawEdges: fileEdges };
-    } catch (err) {
-      const message = `${rel}: parse failed — ${err instanceof Error ? err.message : String(err)}`;
-      errors.push(message);
-      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: [], rawEdges: [], error: message };
-    }
-  });
-
+  } finally {
+    await dispatcher.dispose();
+  }
   // Persist the memo BEFORE enrichment, because `enrichGraph` mutates these very
   // node objects (summary/crux/summary_state) and the cache must only ever hold
   // pristine Tier-1 output — otherwise a replayed node would arrive pre-enriched
   // and a cold build and an incremental build could disagree. The meaning layer
   // has its own cache (wiring.json itself, keyed on body_hash); this one is
   // strictly about not re-parsing.
+  // Every reused entry has already passed a fresh source hash/classification
+  // check. If the roster and stats also match, the existing raw memo is exactly
+  // what we would serialize. Keep it on disk before enrichment mutates nodes.
+  const unchangedExtract = files.length > 0 && reused === files.length
+    && Object.keys(priorExtract.files).length === files.length
+    && files.every((file) => priorExtract.files[file.rel].size === file.size
+      && priorExtract.files[file.rel].mtimeMs === file.mtimeMs);
   writeExtractCache(outDir, {
     ...emptyExtractCache(),
     files: entries,
-  });
+  }, unchangedExtract);
 
+  const perlFacts = new Map(Object.entries(perlEntries).map(([file, entry]) => [file, entry.languageData!]));
+  const perlEnvironment = buildPerlModuleEnvironment(perlFacts, selection.perlConfig, root);
+  const frameworks = materializePerlFrameworks(perlFacts, perlEnvironment);
+  nodes.push(...frameworks.nodes); rawEdges.push(...frameworks.rawEdges);
   const edges = resolveEdges(nodes, rawEdges, { goModules: readGoModules(root, repoFiles) });
+  const perlResolution = resolvePerlEdges(nodes, frameworks.files, perlEnvironment);
+  perlResolution.diagnostics.push(...frameworks.diagnostics);
+  edges.push(...perlResolution.edges);
+  const resolutionDiagnosticsByFile = new Map<string, typeof perlResolution.diagnostics>();
+  for (const diagnostic of perlResolution.diagnostics) {
+    const diagnostics = resolutionDiagnosticsByFile.get(diagnostic.file) ?? [];
+    diagnostics.push(diagnostic);
+    resolutionDiagnosticsByFile.set(diagnostic.file, diagnostics);
+  }
+  const perlDiagnostics = Object.fromEntries(Object.entries(perlEntries).map(([file, entry]) => {
+    const diagnostics = [...entry.languageData!.diagnostics, ...resolutionDiagnosticsByFile.get(file) ?? []];
+    if (diagnostics.length) errors.push(file + ": " + diagnostics.slice(0, 3).map((d) => d.code + ": " + d.message).join("; "));
+    return [file, { status: entry.status === "failed" ? "failed" : diagnostics.length ? "partial" : "ok", diagnostics }];
+  }));
+  try {
+    const path = join(outDir, CACHE_DIR, "perl-diagnostics.json");
+    if (Object.keys(perlDiagnostics).length) writeJsonAtomic(path, { version: 1, files: perlDiagnostics }, true);
+    else rmSync(path, { force: true });
+  } catch { /* regenerable diagnostics; extraction errors are still in the result */ }
 
   // Guard 5 (minimum-substance): node counts aren't known until nodes are
   // assembled, so the merge-tiny-scopes-into-root guard runs here.
@@ -358,7 +378,7 @@ export async function buildGraph(
   // these source bytes." Nothing about the projections below — which is why it is
   // safe to write here, and why `graphOnly` builds (the query path, which stops
   // right after this line) are still recorded as fresh.
-  writeFingerprint(outDir, entries, opts.onlyDirs);
+  writeFingerprint(outDir, entries, opts.onlyDirs, selection.analysisIdentity);
 
   // Tier-2 passive surface: project the nodes into per-file markdown cards, and
   // refresh the INDEX roster. Pure projection — no LLM, no network.
@@ -392,6 +412,13 @@ export async function buildGraph(
   for (const e of edges) byRelation[e.relation] = (byRelation[e.relation] ?? 0) + 1;
 
   return {
+    ...(Object.keys(perlEntries).length ? { perl: {
+      files: Object.keys(perlEntries).length,
+      partial: Object.values(perlDiagnostics).filter((e) => e.status === "partial").length,
+      failed: Object.values(perlDiagnostics).filter((e) => e.status === "failed").length,
+      diagnostics: Object.values(perlDiagnostics).reduce((n, e) => n + e.diagnostics.length, 0),
+      workerStarts: dispatcher.perlWorkerStarts,
+    } } : {}),
     contextDir: outDir,
     graphPath,
     cards: cardStats.written,

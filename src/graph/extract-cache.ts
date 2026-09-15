@@ -23,17 +23,19 @@
  * extraction code itself, caught by content-hashing it — see
  * {@link extractorStamp}. Neither asks anyone to remember to bump anything.
  */
-import { readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join } from "node:path";
+import { createRequire } from "node:module";
 import { CACHE_DIR } from "../context/node-file.js";
 import { readJson, writeJsonAtomic } from "../util/state.js";
 import type { RawEdge } from "./extract.js";
 import type { NodeV1 } from "./types.js";
+import type { PerlFileFacts } from "./perl-types.js";
 
 /** Bump when the on-disk shape below changes. */
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 export const EXTRACT_CACHE_PREFIX = "extract";
 
 export interface ExtractEntry {
@@ -43,6 +45,10 @@ export interface ExtractEntry {
   hash: string;
   nodes: NodeV1[];
   rawEdges: RawEdge[];
+  classification?: string;
+  languageData?: PerlFileFacts;
+  status?: "ok" | "partial" | "failed";
+  cacheable?: boolean;
   /** Set when this file couldn't be read or parsed. The entry exists anyway so the
    * freshness probe doesn't flag the file as new on every query; replaying it
    * re-reports the same error and contributes no nodes, exactly as a cold build
@@ -80,7 +86,7 @@ export function extractCachePath(outDir: string): string | null {
 /** Keep `.cache/` from growing a file per version forever: after writing, drop all
  * but the newest `keep` files sharing a prefix. Best-effort and never fatal — this
  * is a cache directory, and a failure here costs disk, not correctness. */
-export function pruneSidecars(cacheDir: string, prefix: string, keep = 2): void {
+export function pruneSidecars(cacheDir: string, prefix: string, keep = 2, keepPath?: string): void {
   try {
     const mine = readdirSync(cacheDir)
       .filter((f) => f.startsWith(`${prefix}.`) && f.endsWith(".json"))
@@ -88,7 +94,7 @@ export function pruneSidecars(cacheDir: string, prefix: string, keep = 2): void 
         const full = join(cacheDir, f);
         return { full, mtimeMs: statSync(full).mtimeMs };
       })
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+      .sort((a, b) => Number(b.full === keepPath) - Number(a.full === keepPath) || b.mtimeMs - a.mtimeMs);
     for (const f of mine.slice(keep)) rmSync(f.full, { force: true });
   } catch {
     /* nothing here is load-bearing */
@@ -105,8 +111,10 @@ let memoizedStamp: string | null | undefined;
  * Identity of the code that produces the cached parses. Both sidecars key on it,
  * so *anything* that can change extraction output has to change this string.
  *
- * Content-hashed over every sibling module in this directory, plus the package
- * version. Two earlier instincts are deliberately rejected:
+ * Content-hashed over this directory's modules and queries, the package version,
+ * and the web runtime identity. Perl assets are hashed separately because a new
+ * worker reloads them even in a long-lived process. Two earlier instincts are
+ * deliberately rejected:
  *
  * - **Not a timestamp.** This was `mtime:size` of `extract.js` alone, which is
  *   wrong in both directions. Too loose: the parse of `db.count()` depends on
@@ -125,7 +133,8 @@ let memoizedStamp: string | null | undefined;
  * tree-sitter grammar upgrade (which changes parse output without changing any of
  * graft's own files) invalidates too.
  *
- * Measured at ~0.5ms for 21 files / 556KB, paid once per process.
+ * Loaded-code identity is memoized per process. Asset metadata is checked on
+ * each call; changed metadata or strict hash mode rehashes the asset contents.
  *
  * **Null when no identity can be established at all**, and that is deliberately not
  * a string. It used to return `"unknown"` on failure — but `"unknown"` was then
@@ -138,7 +147,12 @@ let memoizedStamp: string | null | undefined;
  */
 export function extractorStamp(): string | null {
   if (memoizedStamp === undefined) memoizedStamp = computeStamp();
-  return memoizedStamp;
+  if (memoizedStamp === null) return null;
+  // A new Perl worker reads assets on each operation, including in a long-lived
+  // MCP process. Asset replacement/restoration must turn over the identity even
+  // though the parent's loaded JS module identity remains fixed.
+  const assets = stampPerlAssets(join(dirname(fileURLToPath(import.meta.url)), "grammars", "perl"));
+  return createHash("sha256").update(memoizedStamp).update(assets).digest("hex").slice(0, 16);
 }
 
 function computeStamp(): string | null {
@@ -147,7 +161,9 @@ function computeStamp(): string | null {
     // `.js` when running from `dist/`, `.ts` under tsx — take the extension from
     // our own filename rather than guessing which layout we're in.
     const dir = dirname(self);
-    const hashed = stampDir(dir, extname(self), packageVersion(dir) ?? "");
+    const runtime = createRequire(import.meta.url).resolve("web-tree-sitter");
+    const runtimeManifest = readFileSync(join(dirname(runtime), "package.json"));
+    const hashed = stampDir(dir, extname(self), (packageVersion(dir) ?? "") + runtimeManifest.toString("utf8"));
     if (hashed) return hashed;
     // Couldn't read the modules (bundled into one file, say). The version alone is
     // a weaker identity — it can't see a local edit — but it still turns over on
@@ -166,7 +182,7 @@ function computeStamp(): string | null {
  * the one the old implementation happened to watch.
  */
 export function stampDir(dir: string, ext: string, version = ""): string | null {
-  const files = readdirSync(dir).filter((f) => f.endsWith(ext)).sort();
+  const files = stampFiles(dir).filter((f) => f.endsWith(ext) || f.endsWith(".scm")).sort();
   if (!files.length) return null;
   const h = createHash("sha256");
   h.update(version);
@@ -175,6 +191,40 @@ export function stampDir(dir: string, ext: string, version = ""): string | null 
     h.update(readFileSync(join(dir, f)));
   }
   return h.digest("hex").slice(0, 16);
+}
+
+function stampFiles(dir: string, prefix = ""): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(join(dir, prefix), { withFileTypes: true })) {
+    const path = join(prefix, entry.name);
+    if (entry.isDirectory()) files.push(...stampFiles(dir, path));
+    else if (entry.isFile()) files.push(path);
+  }
+  return files;
+}
+
+const assetStamps = new Map<string, { statKey: string; hash: string }>();
+
+/** Hash asset bytes/provenance, reusing only while their file identities are
+ * unchanged. Strict refresh verifies bytes even if metadata has been restored. */
+export function stampPerlAssets(dir: string): string {
+  try {
+    const files = stampFiles(dir).sort();
+    const statKey = files.map((file) => {
+      const stat = statSync(join(dir, file), { bigint: true });
+      return `${file}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    }).join("|");
+    const cached = assetStamps.get(dir);
+    if (process.env.GRAFT_REFRESH !== "hash" && cached?.statKey === statKey) return cached.hash;
+    const hash = createHash("sha256");
+    for (const file of files) hash.update(file).update(readFileSync(join(dir, file)));
+    const result = hash.digest("hex");
+    assetStamps.set(dir, { statKey, hash: result });
+    return result;
+  } catch {
+    assetStamps.delete(dir);
+    return "unavailable-perl-assets";
+  }
 }
 
 /** graft's own version, or null when it can't be read. */
@@ -210,12 +260,14 @@ export function readExtractCache(outDir: string): ExtractCache {
  * unwritable cache dir must never fail the build (it only costs the next build its
  * reuse). Returns false when nothing was written, including the deliberate case of
  * having no extractor identity: a parse we can't attribute must never be replayed. */
-export function writeExtractCache(outDir: string, cache: ExtractCache): boolean {
+export function writeExtractCache(outDir: string, cache: ExtractCache, unchanged = false): boolean {
   const path = extractCachePath(outDir);
   if (path === null) return false;
   try {
-    writeJsonAtomic(path, cache, true);
-    pruneSidecars(join(outDir, CACHE_DIR), EXTRACT_CACHE_PREFIX);
+    if (!unchanged || !existsSync(path)) writeJsonAtomic(path, cache, true);
+    // Reusing the active memo must still retire old versions without evicting
+    // the active one just because its contents no longer need a write.
+    pruneSidecars(join(outDir, CACHE_DIR), EXTRACT_CACHE_PREFIX, 2, path);
     return true;
   } catch {
     return false;

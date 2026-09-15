@@ -24,10 +24,10 @@ import { contentHash } from "../util/id.js";
 import { readSourceFile } from "../util/source.js";
 import { readJson, writeJsonAtomic } from "../util/state.js";
 import { extractorStamp, pruneSidecars, type ExtractEntry } from "./extract-cache.js";
-import { listSourceStats } from "./source-files.js";
+import { collectSourceFiles } from "./source-files.js";
 
 export const FINGERPRINT_PREFIX = "fingerprint";
-const FINGERPRINT_VERSION = 1;
+const FINGERPRINT_VERSION = 2;
 
 /** The identity this graft's prints are filed under. Unlike the extract memo, a
  * missing extractor identity is *not* disqualifying here: freshness is a claim about
@@ -54,6 +54,7 @@ export interface Fingerprint {
    * — so the query-path freshness probe (which never sees a CLI flag) enumerates the
    * identical whitelisted set and excluded files are never phantom "added" drift. */
   onlyDirs?: string[];
+  analysisIdentity?: string;
 }
 
 /** What moved since the last build. Empty in all three arrays = nothing to do. */
@@ -64,6 +65,8 @@ export interface Drift {
   added: string[];
   /** Recorded files that are gone from disk. */
   removed: string[];
+  /** Marker/config/excluded-candidate inputs changed independently of nodes. */
+  inputsChanged?: boolean;
 }
 
 /** `<outDir>/.cache/fingerprint.<stamp>.json` — keyed by extractor identity for the
@@ -88,12 +91,14 @@ export function writeFingerprint(
   outDir: string,
   entries: Record<string, ExtractEntry>,
   onlyDirs?: string[],
+  analysisIdentity?: string,
 ): boolean {
   const files: Record<string, Print> = {};
   for (const [rel, e] of Object.entries(entries)) files[rel] = [e.size, e.mtimeMs, e.hash];
   try {
     const record: Fingerprint = { version: FINGERPRINT_VERSION, extractor: stamp(), files };
     if (onlyDirs && onlyDirs.length > 0) record.onlyDirs = onlyDirs;
+    if (analysisIdentity !== undefined) record.analysisIdentity = analysisIdentity;
     writeJsonAtomic(fingerprintPath(outDir), record, true);
     pruneSidecars(join(outDir, CACHE_DIR), FINGERPRINT_PREFIX);
     return true;
@@ -132,11 +137,11 @@ export function statUnchanged(
 }
 
 export function isClean(d: Drift): boolean {
-  return d.changed.length === 0 && d.added.length === 0 && d.removed.length === 0;
+  return d.changed.length === 0 && d.added.length === 0 && d.removed.length === 0 && !d.inputsChanged;
 }
 
 export function driftCount(d: Drift): number {
-  return d.changed.length + d.added.length + d.removed.length;
+  return d.changed.length + d.added.length + d.removed.length + (d.inputsChanged ? 1 : 0);
 }
 
 /**
@@ -155,7 +160,9 @@ export function probeDrift(root: string, outDir: string): Drift | null {
   const seen = new Set<string>();
 
   const onlyDirs = fp.onlyDirs && fp.onlyDirs.length > 0 ? new Set(fp.onlyDirs) : undefined;
-  for (const f of listSourceStats(root, outDir, undefined, onlyDirs)) {
+  const selection = collectSourceFiles(root, outDir, undefined, onlyDirs);
+  if (fp.analysisIdentity !== undefined && fp.analysisIdentity !== selection.analysisIdentity) drift.inputsChanged = true;
+  for (const f of selection.files) {
     seen.add(f.rel);
     const print = fp.files[f.rel];
     if (!print) {
@@ -163,6 +170,10 @@ export function probeDrift(root: string, outDir: string): Drift | null {
       continue;
     }
     const [size, mtimeMs, hash] = print;
+    if (selection.readErrors.has(f.rel)) {
+      if (hash) drift.changed.push(f.rel);
+      continue;
+    }
     if (statUnchanged({ size, mtimeMs, hash }, f)) continue;
     // Suspect: confirm by bytes, so a touch (or a checkout that restores the
     // same content) doesn't cost a rebuild. An entry with an empty hash lands

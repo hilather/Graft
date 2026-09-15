@@ -18,17 +18,23 @@
  * `pending` (never summarized) is not drift — it's a deliberate Tier-1-only build.
  */
 import { resolve } from "node:path";
-import { relPosix } from "../util/paths.js";
 import { contextDirFor } from "../context/node-file.js";
-import { extractFile, languageOf } from "./extract.js";
-import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
-import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
-import { listSourceFiles } from "./build.js";
+import { SourceDispatcher } from "./source-dispatch.js";
+import { collectSourceFiles } from "./source-files.js";
+import type { PerlParserOptions } from "./perl-parser.js";
+import type { PerlFileFacts } from "./perl-types.js";
+import type { NodeV1 } from "./types.js";
+import { buildPerlModuleEnvironment } from "./perl-modules.js";
+import { resolvePerlEdges } from "./perl-resolve.js";
+import { materializePerlFrameworks } from "./perl-frameworks.js";
+import { perlFileResult } from "./perl-extract.js";
 import { readGraph, wiringPath } from "./write.js";
 import { readFingerprint } from "./fingerprint.js";
 import { readSourceFile } from "../util/source.js";
 
 export interface GraphCheckResult {
+  errors?: string[];
+  analysisChanged?: boolean;
   ok: boolean;
   /** True when there is no graph.json (a graph has never been built). */
   missing: boolean;
@@ -49,6 +55,7 @@ export interface GraphCheckResult {
 
 export interface GraphCheckOptions {
   contextDir?: string;
+  perlParser?: PerlParserOptions;
 }
 
 // async: the breadth tier's WASM grammars load asynchronously and must be warmed
@@ -86,52 +93,51 @@ export async function checkGraph(
   // file as "added".
   const fpOnlyDirs = readFingerprint(outDir)?.onlyDirs;
   const onlyDirs = fpOnlyDirs && fpOnlyDirs.length > 0 ? new Set(fpOnlyDirs) : undefined;
-  const sourceFiles = listSourceFiles(root, outDir, undefined, onlyDirs);
-  await warmGenericGrammars(
-    new Set(sourceFiles.map((f) => genericLangOf(f)?.name).filter((n): n is string => !!n)),
-  );
-  // Container-tier grammars need the same warmup as the generic ones, for the same
-  // reason: extraction below is synchronous. Missing this is what made `graft
-  // check` report every `.vue` node as `removed` right after a clean build (#236)
-  // — the tier extracted fine, and then the check had no branch that could see it.
-  await warmContainerGrammars(
-    new Set(sourceFiles.map((f) => containerLangOf(f)?.name).filter((n): n is string => !!n)),
-  );
-  const current = new Map<string, string>(); // id → body_hash
-  for (const file of sourceFiles) {
-    // The same three-way branch `buildGraph` uses, in the same order. The two must
-    // stay in step: a tier the build extracts and the check cannot see reports as
-    // `removed` forever, and the `graft build` the check tells you to run can never
-    // repair it.
-    const lang = languageOf(file);
-    const container = lang ? null : containerLangOf(file);
-    const generic = lang || container ? null : genericLangOf(file);
-    let source: string | null;
-    try {
-      source = readSourceFile(file);
-    } catch {
-      continue; // unreadable now → its nodes show up as `removed` below
+  const selection = collectSourceFiles(root, outDir, undefined, onlyDirs);
+  for (const [file, message] of selection.readErrors) if (!selection.classifications.has(file)) (result.errors ??= []).push(`${file}: SOURCE_CLASSIFICATION_UNAVAILABLE: ${message}`);
+  const fingerprint = readFingerprint(outDir);
+  if (fingerprint?.analysisIdentity !== undefined && fingerprint.analysisIdentity !== selection.analysisIdentity) result.analysisChanged = true;
+  const dispatcher = new SourceDispatcher(opts.perlParser);
+  const current = new Map<string, string>();
+  const perlFacts = new Map<string, PerlFileFacts>();
+  const perlNodes: NodeV1[] = [];
+  try {
+    await dispatcher.warm(selection.classifications.values());
+    for (const file of selection.files) {
+      const classification = selection.classifications.get(file.rel)!;
+      const unavailable = (message: string) => {
+        if (classification.kind !== "perl") { (result.errors ??= []).push(file.rel + ": " + message); return; }
+        const failure = perlFileResult(file.rel, "", [{ file: file.rel, code: "PERL_SOURCE_READ_FAILED", severity: "error", message }], "failed", false);
+        perlFacts.set(file.rel, failure.languageData); perlNodes.push(...failure.nodes);
+        for (const node of failure.nodes) current.set(node.id, node.body_hash);
+      };
+      const selectionError = selection.readErrors.get(file.rel);
+      if (selectionError) { unavailable(selectionError); continue; }
+      let source: string | null;
+      try { source = readSourceFile(file.abs); } catch (error) { unavailable(error instanceof Error ? error.message : String(error)); continue; }
+      if (source === null) continue;
+      try {
+        const extraction = dispatcher.extract(file.rel, source, classification);
+        const extracted = extraction instanceof Promise ? await extraction : extraction;
+        if (extracted.languageData) {
+          perlFacts.set(file.rel, extracted.languageData);
+          perlNodes.push(...extracted.nodes);
+        }
+        for (const node of extracted.nodes) current.set(node.id, node.body_hash);
+      } catch { /* missing current nodes report drift, preserving other languages */ }
     }
-    if (source === null) continue; // unsupported encoding (e.g. UTF-16BE)
-    const rel = relPosix(root, file);
-    try {
-      const extracted = lang
-        ? extractFile(rel, source, lang)
-        : container
-          ? extractContainer(rel, source, container)
-          : generic
-            ? extractGeneric(rel, source, generic.name)
-            : null;
-      // No tier claims this file. Spelled out rather than asserted away: the
-      // `generic!` that used to stand in this position threw a TypeError on a
-      // container-tier file, the catch below swallowed it as a parse failure, and
-      // a missing branch became a silent permanent `removed` (#236). Returning
-      // null here means the next tier graft gains fails loudly in the type
-      // checker instead.
-      if (extracted === null) continue;
-      for (const n of extracted.nodes) current.set(n.id, n.body_hash);
-    } catch {
-      // parse failure → skip; the committed nodes for this file become `removed`.
+  } finally { await dispatcher.dispose(); }
+  const perlEnvironment = buildPerlModuleEnvironment(perlFacts, selection.perlConfig, root);
+  const frameworks = materializePerlFrameworks(perlFacts, perlEnvironment);
+  perlNodes.push(...frameworks.nodes);
+  for (const node of frameworks.nodes) current.set(node.id, node.body_hash);
+  const perlResolution = resolvePerlEdges(perlNodes, frameworks.files, perlEnvironment);
+  perlResolution.diagnostics.push(...frameworks.diagnostics);
+  for (const [file, facts] of perlFacts) {
+    const diagnostics = [...facts.diagnostics, ...perlResolution.diagnostics.filter((d) => d.file === file)];
+    if (diagnostics.length) {
+      result.errors ??= [];
+      result.errors.push(file + ": " + diagnostics.slice(0, 3).map((d) => d.code + ": " + d.message).join("; "));
     }
   }
 
@@ -159,7 +165,9 @@ export async function checkGraph(
     result.added.length === 0 &&
     result.removed.length === 0 &&
     result.changed.length === 0 &&
-    result.stale.length === 0;
+    result.stale.length === 0 &&
+    !result.analysisChanged &&
+    !result.errors?.length;
   return result;
 }
 
@@ -177,6 +185,8 @@ export function formatGraphCheckReport(r: GraphCheckResult): string {
   }
 
   const lines: string[] = ["graph check: STALE", ""];
+  if (r.analysisChanged) lines.push("Perl classification or module-resolution inputs changed.");
+  if (r.errors?.length) lines.push("Analysis diagnostics:", ...r.errors.map((error) => `  ! ${error}`), "");
   const structural = r.added.length + r.removed.length + r.changed.length;
   if (r.changed.length) {
     lines.push(`changed (${r.changed.length}):`);
@@ -195,7 +205,7 @@ export function formatGraphCheckReport(r: GraphCheckResult): string {
     for (const id of r.stale) lines.push(`  ! ${id}`);
   }
   lines.push("");
-  if (structural) lines.push("Run `graft build` to rebuild the structure, then commit graft/.");
+  if (structural || r.analysisChanged) lines.push("Run `graft build` to rebuild the structure, then commit graft/.");
   if (r.stale.length) lines.push("Run `graft build --deep` to refresh stale summaries.");
   return lines.join("\n");
 }

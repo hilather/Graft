@@ -1,0 +1,36 @@
+diff --git a/grammar.js b/grammar.js
+index 10a1fa8..4d4e413 100644
+--- a/grammar.js
++++ b/grammar.js
+@@ -402,8 +402,13 @@ module.exports = grammar({
+     // `sub foo ($sig);`. Anonymous subs always need a body, so they keep
+     // `_anon_sub_tail`; here we allow either a body or a terminating `;`.
+     _sub_decl_tail: $ => seq(
+-      optseq(':', optional(field('attributes', $.attrlist))),
+-      optional(choice($.prototype, $.signature)),
++      choice(
++        seq($.prototype, ':', optional(field('attributes', $.attrlist))),
++        seq(
++          optseq(':', optional(field('attributes', $.attrlist))),
++          optional(choice($.prototype, $.signature)),
++        ),
++      ),
+       choice(field('body', alias($._body_block, $.block)), $._semicolon),
+     ),
+ 
+@@ -790,8 +795,13 @@ module.exports = grammar({
+     ),
+ 
+     _anon_sub_tail: $ => seq(
+-      optseq(':', optional(field('attributes', $.attrlist))),
+-      optional(choice($.prototype, $.signature)),
++      choice(
++        seq($.prototype, ':', optional(field('attributes', $.attrlist))),
++        seq(
++          optseq(':', optional(field('attributes', $.attrlist))),
++          optional(choice($.prototype, $.signature)),
++        ),
++      ),
+       field('body', $.block),
+     ),
+ 

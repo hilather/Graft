@@ -39,7 +39,9 @@ export interface ResolveSymbolOptions {
  * Resolve a query string to every matching node in the graph.
  *
  * Matching, in order:
- *  1. Non-file nodes whose `name` equals the query case-insensitively, OR
+ *  0. A full symbol ID (containing `#`) matches exactly, including case.
+ *     Perl qualified names match persisted identity with case preserved.
+ *  1. Other non-file nodes whose `name` equals the query case-insensitively, OR
  *     whose `id` ends with `#<query>` or `.<query>` case-insensitively — this
  *     is what makes a qualified name like `Cache.get` resolve against an id
  *     like `src/cache.ts#Cache.get`.
@@ -58,12 +60,12 @@ export function resolveSymbol(graph: GraphV1, query: string, opts: ResolveSymbol
   const lowerQuery = query.toLowerCase();
   const looksLikeFilename = query.includes(".") && !query.includes("#");
 
-  let matches = symbolMatches(graph.nodes, lowerQuery);
+  let matches = query.includes("#") ? graph.nodes.filter((n) => n.id === query) : symbolMatches(graph.nodes, query);
 
-  if (matches.length === 0 && query.includes(".")) {
+  if (matches.length === 0 && query.includes(".") && !query.includes("#") && !query.includes("::")) {
     const lastSegment = query.slice(query.lastIndexOf(".") + 1).toLowerCase();
     if (lastSegment) {
-      matches = graph.nodes.filter((n) => n.kind !== "file" && n.name.toLowerCase() === lastSegment);
+      matches = graph.nodes.filter((n) => n.kind !== "file" && n.language !== "perl" && n.name.toLowerCase() === lastSegment);
     }
   }
 
@@ -98,11 +100,13 @@ function stripOrdinals(idTail: string): string {
   return idTail.replace(/~\d+(?=\.|$)/g, "");
 }
 
-function symbolMatches(nodes: NodeV1[], lowerQuery: string): NodeV1[] {
+function symbolMatches(nodes: NodeV1[], query: string): NodeV1[] {
+  const lowerQuery = query.toLowerCase();
   const suffixHash = "#" + lowerQuery;
   const suffixDot = "." + lowerQuery;
   return nodes.filter((n) => {
     if (n.kind === "file") return false;
+    if (n.language === "perl") return n.name === query || n.qualified_name === query || n.id.slice(n.id.indexOf("#") + 1) === query;
     if (n.name.toLowerCase() === lowerQuery) return true;
     const lowerId = n.id.toLowerCase();
     const hashIdx = lowerId.indexOf("#");

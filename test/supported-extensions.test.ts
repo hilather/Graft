@@ -21,6 +21,9 @@ test("supportedExtensions covers both tiers, sorted and de-duped", () => {
   for (const e of [".rs", ".rb", ".c", ".cpp"]) assert.ok(exts.includes(e), `breadth ${e}`);
   // container tier
   assert.ok(exts.includes(".vue"), "container .vue");
+  // Dedicated Perl dispatch; classification still rejects foreign shebangs and
+  // ambiguous non-Perl .pl/.t files, and treats POD as documentation only.
+  for (const e of [".pm", ".pl", ".t", ".psgi", ".cgi", ".pod"]) assert.ok(exts.includes(e), `Perl ${e}`);
   // de-duped (.java is in BOTH tiers but must appear once) and sorted
   assert.equal(exts.filter((e) => e === ".java").length, 1, ".java de-duped across tiers");
   assert.deepEqual(exts, [...exts].sort(), "sorted");
@@ -40,5 +43,6 @@ test("extension normalization: missing dot and mixed case still match a parser",
   assert.deepEqual(unsupportedExtensions(["ts"]), [], "no leading dot still recognized");
   assert.deepEqual(unsupportedExtensions([".TS", ".Php"]), [], "case-insensitive");
   assert.deepEqual(unsupportedExtensions(["vue"]), [], "container extension recognized without a dot too");
+  assert.deepEqual(unsupportedExtensions(["pm", ".PM", "pl", ".T", "PSGI", "cgi", ".Pod"]), [], "Perl extension normalization");
   assert.deepEqual(unsupportedExtensions(["Svelte"]), ["Svelte"], "unsupported still flagged, echoed as the user typed it");
 });

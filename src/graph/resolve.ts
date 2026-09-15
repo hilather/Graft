@@ -130,6 +130,10 @@ export function resolveEdges(
   const phpFilesBySuffix = new Map<string, string[]>();
   const hasGoModules = !!opts.goModules?.length;
   for (const n of nodes) {
+    // Perl namespaces and lexical bindings belong to the dedicated resolver.
+    // Persisted identity also protects extensionless or explicitly mapped files
+    // from becoming a unique-name candidate for an unrelated language.
+    if (n.language === "perl") continue;
     if (n.kind === "file") {
       if (hasGoModules && n.path.endsWith(".go")) {
         const dir = posix.dirname(toPosixPath(n.path));

@@ -12,14 +12,12 @@
  *   5. Write one markdown file per node (preserving human notes) + a manifest.
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { walkDir } from "../ingest/fs.js";
-import { filterByOnlyDirs } from "../graph/source-files.js";
+import { join, resolve, sep } from "node:path";
+import { collectSourceFiles, filterByOnlyDirs, walkSourceTree } from "../graph/source-files.js";
 import { readFingerprint } from "../graph/fingerprint.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
-import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
 import type { Summarizer } from "../ai/summarize.js";
 import { LlmFailureGate } from "../ai/failure.js";
 import type { FileSummary, SynthNode, Synthesizer } from "../ai/synthesize.js";
@@ -112,13 +110,18 @@ export function listContextFiles(
   exts: readonly string[],
   explicitOnlyDirs?: readonly string[],
 ): string[] {
-  const walked = walkDir(root, readIncludeDirs(root), {
-    followSubmodules: readFollowSubmodules(root),
-    followNestedRepos: readFollowNestedRepos(root),
-  })
-    .filter((f) => exts.some((e) => f.toLowerCase().endsWith(e)))
-    .filter((f) => !f.startsWith(outDir));
-  return filterByOnlyDirs(walked, root, resolveOnlyDirs(outDir, explicitOnlyDirs));
+  const walked = walkSourceTree(root).filter((f) => f !== outDir && !f.startsWith(`${outDir}${sep}`));
+  const onlyDirs = resolveOnlyDirs(outDir, explicitOnlyDirs);
+  const selection = collectSourceFiles(root, outDir, walked, onlyDirs);
+  return filterByOnlyDirs(walked, root, onlyDirs).filter((file) => {
+    const rel = relPosix(root, file);
+    if (selection.perlConfig.files[rel] === "exclude") return false;
+    // The default concept pass adds exactly the shared classified Perl set,
+    // including POD and shebang scripts. An explicit -e list retains its
+    // existing extension-filter contract and can still request extra formats.
+    return exts.some((ext) => file.toLowerCase().endsWith(ext.toLowerCase()))
+      || exts === CODE_EXTENSIONS && selection.classifications.get(rel)?.kind === "perl";
+  });
 }
 
 /** The gitignored LLM-call cache: per-file summaries + per-batch synthesis. */

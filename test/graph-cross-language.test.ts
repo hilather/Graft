@@ -34,6 +34,20 @@ function n(id: string, kind: NodeV1["kind"]): NodeV1 {
 const calls = (edges: ReturnType<typeof resolveEdges>): string[] =>
   edges.filter((e) => e.relation === "calls").map((e) => e.target);
 
+test("cross-language: persisted Perl identity excludes shebang and explicitly mapped names from generic fallback", () => {
+  for (const path of ["bin/tool", "mapped.ts", "lib/Helper.pm"]) {
+    const perlFile = { ...n(path, "file"), language: "perl" };
+    const perlFunction = { ...n(path + "#helper", "function"), language: "perl" };
+    const nodes = [n("caller.ts", "file"), n("caller.ts#run", "function"), perlFile, perlFunction];
+    const edges = resolveEdges(nodes, [
+      { source: "caller.ts#run", relation: "calls", name: "helper", file: "caller.ts" },
+      { source: path, relation: "contains", targetId: perlFunction.id, file: path },
+    ]);
+    assert.deepEqual(calls(edges), []);
+    assert.equal(edges.filter((e) => e.relation === "contains").length, 1);
+  }
+});
+
 test("cross-language: a Go builtin does not resolve to a TypeScript helper", () => {
   // Exactly the shape found in the wild — `make` exists only in a frontend test.
   const nodes = [

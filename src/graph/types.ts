@@ -59,6 +59,10 @@ export interface NodeV1 {
   // index) key off a stored field instead of re-deriving it by slicing `id`,
   // which breaks once ids can carry a dedup ordinal (`Cache.get~2`).
   owner?: string;
+  /** Persisted language identity, including shebang/explicitly mapped sources. */
+  language?: string;
+  /** Canonical source namespace; retrieval metadata, never a parsed node ID. */
+  qualified_name?: string;
 
   // location (Tier-1, deterministic)
   path: string; // repo-relative: "src/cache.ts"

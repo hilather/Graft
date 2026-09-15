@@ -42,3 +42,13 @@ for (const f of readdirSync(scmSrc)) {
   }
 }
 console.log(`grammar queries → dist/graph/queries/ (${scmCount} .scm)`);
+
+// The dedicated Perl parser uses a pinned local asset. Ship its license and
+// provenance with the WASM; an installed package has no source-tree fallback.
+const perlSrc = join(root, "src", "graph", "grammars", "perl");
+const perlOut = join(root, "dist", "graph", "grammars", "perl");
+mkdirSync(perlOut, { recursive: true });
+for (const file of ["tree-sitter-perl.wasm", "node-types.json", "provenance.json", "scanner-literal-class.patch", "prototype-attributes.patch", "LICENSE"]) {
+  copyFileSync(join(perlSrc, file), join(perlOut, file));
+}
+console.log("Perl grammar assets → dist/graph/grammars/perl/");

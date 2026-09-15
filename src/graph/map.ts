@@ -129,10 +129,10 @@ function topHubs(nodes: NodeV1[], inDegree: Map<string, number>, cap: number): H
 
 /** Display labels, not tree-sitter grammars: a `scripts/` tree of `.mjs` files is
  * "javascript" here, not "typescript". See {@link languageLabelOf}. */
-function sortedLanguages(paths: string[]): string[] {
+function sortedLanguages(files: NodeV1[]): string[] {
   const set = new Set<string>();
-  for (const p of paths) {
-    const label = languageLabelOf(p);
+  for (const file of files) {
+    const label = file.language ?? languageLabelOf(file.path);
     if (label) set.add(label);
   }
   return [...set].sort();
@@ -210,7 +210,7 @@ function computeDirEntries(
     path: fullPath(relKey),
     files: g.files.length,
     symbols: g.symbols.length,
-    languages: sortedLanguages(g.files.map((f) => f.path)),
+    languages: sortedLanguages(g.files),
     hubs: topHubs(g.symbols, inDegree, hubsPerDir),
     isFile: fileRelPaths.has(relKey),
   }));
@@ -274,7 +274,7 @@ export function buildRepoMap(graph: GraphV1, opts: BuildRepoMapOptions = {}): Re
       files: totalFiles,
       symbols: allSymbols.length,
       edges: graph.edges.length,
-      languages: sortedLanguages(fileNodes.map((f) => f.path)),
+      languages: sortedLanguages(fileNodes),
     },
     dirs,
     scopes: scopeGroups,

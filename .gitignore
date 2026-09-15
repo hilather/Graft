@@ -28,3 +28,10 @@ transcripts/
 
 # graft's local repository settings — not committed.
 /.graft/
+
+# Local Perl implementation documentation and evidence.
+/docs/perl-support-plan/
+/graft-perl-support-plan/
+/docs/perl-support.md
+/src/graph/grammars/perl/README.md
+/test/fixtures/perl/README.md

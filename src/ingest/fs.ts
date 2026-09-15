@@ -24,7 +24,7 @@ export const SKIP_DIRS = new Set([
   "venv",
 ]);
 
-/** Files above this size are generated/vendored in practice, not hand-written code. */
+/** Default file-size guard; language-aware source walkers can admit bounded exceptions. */
 export const MAX_FILE_BYTES = 1_000_000;
 
 /**
@@ -84,6 +84,8 @@ export interface WalkOptions {
   followSubmodules?: boolean;
   /** Include nested Git clones the parent index does not track. Default false. */
   followNestedRepos?: boolean;
+  /** Admit a bounded language-specific exception above the default byte limit. */
+  includeOversizedFile?: (absolutePath: string, bytes: number) => boolean;
 }
 
 /**
@@ -158,7 +160,7 @@ export function walkDir(
 ): string[] {
   const requested = resolve(dir);
   const root = canonicalWalkRoot(requested);
-  const files = gitVisibleFiles(root, includes, opts) ?? walkFilesystem(root, includes);
+  const files = gitVisibleFiles(root, includes, opts) ?? walkFilesystem(root, includes, opts);
   return remapWalkPaths(requested, root, files);
 }
 
@@ -176,7 +178,7 @@ function gitVisibleFiles(
   // only when at least one boundary-crossing opt-in is on. With both off the
   // walk is byte-for-byte the historical one.
   if (opts.followSubmodules !== true && opts.followNestedRepos !== true) {
-    return gitVisibleFilesShallow(root, includes);
+    return gitVisibleFilesShallow(root, includes, opts);
   }
 
   const state = traversal ?? { topRoot: root, activeRoots: new Set<string>() };
@@ -265,7 +267,7 @@ function gitVisibleFiles(
         // top-level Git command fails and walkDir uses its filesystem fallback.
         // Let an unreadable filesystem fallback surface rather than claiming a
         // healthy graph that silently omitted the child again.
-        childFiles = walkFilesystem(abs, includes);
+        childFiles = walkFilesystem(abs, includes, opts);
       }
       for (const file of childFiles) out.add(file);
       continue;
@@ -273,7 +275,7 @@ function gitVisibleFiles(
 
     try {
       const stat = lstatSync(abs);
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) continue;
+      if (!stat.isFile() || stat.size > MAX_FILE_BYTES && !opts.includeOversizedFile?.(abs, stat.size)) continue;
     } catch {
       // A tracked file deleted from the working tree is still printed by
       // `--cached`; absence means it is not part of the current source set.
@@ -289,7 +291,7 @@ function gitVisibleFiles(
 /** The historical, non-recursive Git path. Kept separate so the default does
  * exactly the same command, filtering, ordering, and duplicate handling as it
  * did before submodule support existed. */
-function gitVisibleFilesShallow(root: string, includes?: ReadonlySet<string>): string[] | null {
+function gitVisibleFilesShallow(root: string, includes?: ReadonlySet<string>, opts: WalkOptions = {}): string[] | null {
   const result = spawnSync(
     "git",
     ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "--"],
@@ -308,7 +310,7 @@ function gitVisibleFilesShallow(root: string, includes?: ReadonlySet<string>): s
     const abs = resolve(root, rel);
     try {
       const stat = lstatSync(abs);
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) continue;
+      if (!stat.isFile() || stat.size > MAX_FILE_BYTES && !opts.includeOversizedFile?.(abs, stat.size)) continue;
     } catch {
       // A tracked file deleted from the working tree is still printed by
       // `--cached`; absence means it is not part of the current source set.
@@ -326,17 +328,18 @@ function skippedPath(path: string, includes?: ReadonlySet<string>): boolean {
   return path.replace(/\\/g, "/").split("/").some((segment) => shouldSkipDir(segment, includes));
 }
 
-function walkFilesystem(dir: string, includes?: ReadonlySet<string>): string[] {
+function walkFilesystem(dir: string, includes?: ReadonlySet<string>, opts: WalkOptions = {}): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
       if (shouldSkipDir(entry.name, includes)) continue;
-      out.push(...walkFilesystem(full, includes));
+      out.push(...walkFilesystem(full, includes, opts));
     } else if (entry.isFile()) {
       if (entry.name.startsWith(".")) continue; // dot-files are not source either
       try {
-        if (statSync(full).size > MAX_FILE_BYTES) continue;
+        const bytes = statSync(full).size;
+        if (bytes > MAX_FILE_BYTES && !opts.includeOversizedFile?.(full, bytes)) continue;
       } catch {
         continue;
       }

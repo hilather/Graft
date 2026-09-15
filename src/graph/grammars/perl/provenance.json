@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "language": "perl",
+  "repository": "https://github.com/tree-sitter-perl/tree-sitter-perl",
+  "revision": "f678e356280566100e7eed21716d6f59abdf96b7",
+  "releaseComparison": "50904961d6a87c5191e611276aa2ecb9d66ca4ff",
+  "license": "MIT",
+  "sourceArchive": {
+    "url": "https://codeload.github.com/tree-sitter-perl/tree-sitter-perl/tar.gz/f678e356280566100e7eed21716d6f59abdf96b7",
+    "sha256": "da3947ef92fd6abe4959927d3ee1c89005d91458e9da1e830e7b890a925982f9"
+  },
+  "generator": {
+    "name": "tree-sitter",
+    "version": "0.26.9",
+    "abi": 15
+  },
+  "compiler": {
+    "name": "wasi-sdk",
+    "version": "29.0",
+    "clang": "21.1.4-wasi-sdk",
+    "referencePlatform": "linux-x86_64",
+    "archiveUrl": "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/wasi-sdk-29.0-x86_64-linux.tar.gz",
+    "archiveSha256": "87d1d1a2879d139cdc624b968efad3d4a97b8078cdff95e63ac88ecafd1a0171"
+  },
+  "runtime": {
+    "name": "web-tree-sitter",
+    "version": "0.26.13"
+  },
+  "inputSha256": {
+    "grammar.js": "aebef974f172f30298e1795ec3b895c3aa0502f26e8c912ae240fda9afc3bfae",
+    "lib/primitives.js": "c6c0006b6ffc9ac11b32a153c2f29b0fdd4b48bafa70da66cfe40e63d6216e10",
+    "lib/unicode_ranges.js": "7f373d5f3ed1c502a2e8e7e54de2c80c50c77b03089dd6de3d6955128287a8e7",
+    "package.json": "d4d51944e78912ffee555032e968c27590018c5ac86acc038fee9afd2017709c",
+    "src/bsearch.h": "6f953a91955c72b1b6b063c34fa877c8b36f5b43c320083ad7361256e67b9484",
+    "src/grammar.json": "c8e1d23a8123b0fe7de014e81b7a1e92ee915f328849d1794bed6c129a476bde",
+    "src/scanner.c": "981953460375bba2db2d60201a89c0d005fd46c9b4088239c6e1b610fa037a1a",
+    "src/tree_sitter/alloc.h": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
+    "src/tsp_intuit_keywords.h": "e65b7139547077b59ad62cb109efcf73d420311706c9dc7b6f9831cb246f2c61",
+    "src/tsp_intuit_more.h": "45ada959185bb4b15f4fe702d52f0aeb5cd992b64cb129248aa843644e6026a2",
+    "src/tsp_intuit_readline.h": "9504b2ef7cce98bd3b22e2226ca05c1b63fd17b56ed3375bf72c4e429af42180",
+    "src/tsp_keywords.h": "2c86ede8eedbaf7854c2f9eef4b835ae55e563d7a85c05e47d8bfee502e5a78f",
+    "src/tsp_unicode.h": "1c81d6e72511578b6ebcafc3e9002427207f5167a7d916b92e34b5f1c36fa01c",
+    "tree-sitter.json": "6051f23494565f52a14efc61a944efac857e327b92991e9700f80d6828bc68fb"
+  },
+  "files": {
+    "tree-sitter-perl.wasm": {
+      "sha256": "5538f8e490ca6a1fb66522022c0c881bb5a062db2618e76d7d6e60683ff5fc3b",
+      "bytes": 4795785
+    },
+    "node-types.json": {
+      "sha256": "5f037c3ef3d4a152f96184646b8122f4c6eb9168cdcd2958e08ccd916c7a2cf3",
+      "bytes": 512024
+    },
+    "LICENSE": {
+      "sha256": "68a9a526ae357ed5a2f8ca5dabb14131b283554b69639bb04816088d4b1f2fa0",
+      "bytes": 1071
+    },
+    "scanner-literal-class.patch": {
+      "sha256": "1ba5278cad41a08dad23de0fa8b672a1a025fb9f4db42a768398dd5e33bd8d58",
+      "bytes": 2185
+    },
+    "prototype-attributes.patch": {
+      "sha256": "2e8d47373f4f11f2735d13ae61ac13da3fcd98dbce7cfd6ae139bd99d694f1a8",
+      "bytes": 1270
+    }
+  },
+  "patches": [
+    {
+      "file": "scanner-literal-class.patch",
+      "path": "src/scanner.c",
+      "resultSha256": "737e94ea5983fac804873cad359f3c0b08ef8881d3d12a0cf635fe8d744c9251",
+      "reason": "Balance paired quote delimiters inside proven literal regex character classes (m{[{}]})."
+    },
+    {
+      "file": "prototype-attributes.patch",
+      "path": "grammar.js",
+      "resultSha256": "92d7d11345e553b4d94681ec627e6c32adb5264727c2e66f4265cae609b6a87c",
+      "reason": "Accept valid named and anonymous subroutine prototypes followed by attributes, preserving existing attribute-before-signature forms."
+    }
+  ]
+}

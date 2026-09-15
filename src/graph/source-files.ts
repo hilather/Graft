@@ -7,18 +7,41 @@
  * {@link listSourceFiles} so its existing importers are unaffected.
  */
 import { statSync } from "node:fs";
-import { resolve } from "node:path";
-import { walkDir } from "../ingest/fs.js";
+import { resolve, sep } from "node:path";
+import { canonicalWalkRoot, walkDir } from "../ingest/fs.js";
 import { relPosix } from "../util/paths.js";
 import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
-import { languageOf, depthExtensions } from "./extract.js";
-import { genericLangOf, genericExtensions } from "./generic.js";
-import { containerLangOf, containerExtensions } from "./container.js";
+import { depthExtensions } from "./extract.js";
+import { genericExtensions } from "./generic.js";
+import { containerExtensions } from "./container.js";
+import { classifySource, needsSourcePrefix, PERL_CANDIDATE_EXTENSIONS, SOURCE_PREFIX_BYTES, type SourceClassification } from "./source-classify.js";
+import { readPerlConfig, perlProjectOf, type EffectivePerlConfig } from "./perl-config.js";
+import { readSourcePrefix } from "../util/source.js";
+import { contentHash } from "../util/id.js";
+import { PERL_MAX_SOURCE_CODE_UNITS } from "./perl-types.js";
 
-/** Every extension graft has a parser for (depth + breadth + container), sorted
+/** Shared structural/deep discovery, including bounded large Perl candidates. */
+export function walkSourceTree(root: string): string[] {
+  const canonicalRoot = canonicalWalkRoot(root);
+  let rules: EffectivePerlConfig["files"] | undefined;
+  return walkDir(root, readIncludeDirs(resolve(root)), {
+    followSubmodules: readFollowSubmodules(resolve(root)),
+    followNestedRepos: readFollowNestedRepos(resolve(root)),
+    includeOversizedFile: (absolutePath, bytes) => {
+      // UTF-8 needs at most three bytes per UTF-16 code unit, plus a BOM.
+      // The parser still enforces the decoded limit after classification.
+      if (bytes > PERL_MAX_SOURCE_CODE_UNITS * 3 + 3) return false;
+      rules ??= readPerlConfig(root, []).files;
+      const rel = relPosix(canonicalRoot, absolutePath);
+      return needsSourcePrefix(rel, rules[rel]);
+    },
+  });
+}
+
+/** Every extension graft has a parser for (depth + breadth + container + Perl), sorted
  * and de-duped — the authoritative answer to "what does `-e` actually support". */
 export function supportedExtensions(): string[] {
-  return [...new Set([...depthExtensions(), ...genericExtensions(), ...containerExtensions()])].sort();
+  return [...new Set([...depthExtensions(), ...genericExtensions(), ...containerExtensions(), ...PERL_CANDIDATE_EXTENSIONS])].sort();
 }
 
 /** Normalize a user-supplied extension: ensure a leading dot, lower-case. */
@@ -64,24 +87,10 @@ export function filterByOnlyDirs(
 export function listSourceFiles(
   root: string,
   outDir: string,
-  repoFiles: string[] = walkDir(root, readIncludeDirs(resolve(root)), {
-    followSubmodules: readFollowSubmodules(resolve(root)),
-    followNestedRepos: readFollowNestedRepos(resolve(root)),
-  }),
+  repoFiles: string[] = walkSourceTree(root),
   onlyDirs?: ReadonlySet<string>,
 ): string[] {
-  // A file is a source file if a depth-tier grammar (languageOf), a breadth-tier
-  // grammar (genericLangOf) or a container (containerLangOf) claims its extension.
-  // All three must agree here or `build` and `check` would enumerate different sets.
-  return filterByOnlyDirs(
-    repoFiles.filter(
-      (f) =>
-        !f.startsWith(outDir) &&
-        (languageOf(f) !== null || genericLangOf(f) !== null || containerLangOf(f) !== null),
-    ),
-    root,
-    onlyDirs,
-  );
+  return collectSourceFiles(root, outDir, repoFiles, onlyDirs).files.map((f) => f.abs);
 }
 
 export interface SourceStat {
@@ -106,15 +115,48 @@ export function listSourceStats(
   repoFiles?: string[],
   onlyDirs?: ReadonlySet<string>,
 ): SourceStat[] {
-  const out: SourceStat[] = [];
-  for (const abs of listSourceFiles(root, outDir, repoFiles, onlyDirs)) {
+  return collectSourceFiles(root, outDir, repoFiles, onlyDirs).files;
+}
+
+export interface SourceSelection {
+  files: SourceStat[];
+  classifications: Map<string, SourceClassification>;
+  /** Reading an input needed for classification failed; never a clean exclusion. */
+  readErrors: Map<string, string>;
+  perlConfig: EffectivePerlConfig;
+  analysisIdentity: string;
+}
+
+/** Build/check/refresh share this snapshot. Retain classification inputs even
+ * for excluded candidates, so an unindexed script gaining a shebang is visible. */
+export function collectSourceFiles(
+  root: string,
+  outDir: string,
+  repoFiles: string[] = walkSourceTree(root),
+  onlyDirs?: ReadonlySet<string>,
+): SourceSelection {
+  const visible = repoFiles.filter((f) => f !== outDir && !f.startsWith(`${outDir}${sep}`));
+  const perlConfig = readPerlConfig(root, visible.map((f) => relPosix(root, f)));
+  const includes = readIncludeDirs(root);
+  const files: SourceStat[] = [];
+  const classifications = new Map<string, SourceClassification>();
+  const readErrors = new Map<string, string>();
+  const candidates: [string, string, string][] = [];
+  for (const abs of filterByOnlyDirs(visible, root, onlyDirs)) {
+    const rel = relPosix(root, abs);
     let s: { size: number; mtimeMs: number };
-    try {
-      s = statSync(abs);
-    } catch {
-      continue;
+    try { s = statSync(abs); } catch { continue; }
+    const rule = perlConfig.files[rel];
+    let prefix: string | null = "";
+    if (needsSourcePrefix(rel, rule)) {
+      try { prefix = readSourcePrefix(abs, SOURCE_PREFIX_BYTES); } catch (error) { prefix = null; readErrors.set(rel, error instanceof Error ? error.message : String(error)); }
+      candidates.push([rel, prefix === null ? "unreadable" : contentHash(prefix), rule ?? ""]);
     }
-    out.push({ abs, rel: relPosix(root, abs), size: s.size, mtimeMs: s.mtimeMs });
+    const classification = prefix === null && !readErrors.has(rel) ? null : classifySource(rel, prefix ?? "", { rule, project: perlProjectOf(rel, perlConfig), includeGenerated: rel.split("/").some((part) => (part === "blib" || part === "_Inline") && includes?.has(part)) });
+    if (!classification) continue;
+    classifications.set(rel, classification);
+    files.push({ abs, rel, size: s.size, mtimeMs: s.mtimeMs });
   }
-  return out;
+  candidates.sort(([a], [b]) => a.localeCompare(b));
+  return { files, classifications, readErrors, perlConfig, analysisIdentity: contentHash(JSON.stringify({ config: perlConfig.identity, candidates })) };
 }

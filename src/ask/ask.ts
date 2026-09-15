@@ -17,6 +17,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import matter from "gray-matter";
 import { contextDirFor } from "../context/node-file.js";
+import { isPerlTestPath } from "../graph/test-path.js";
 import { withSavings, savingsFor, savingsTurnNudge, type Savings } from "../context/savings.js";
 import { loadGraphCached, loadAskIndexCached } from "../graph/load.js";
 import {
@@ -199,8 +200,8 @@ function loadCorpus(outDir: string): Corpus {
  * sending the agent to the wrong file). A multiplicative de-rank keeps tests in
  * the results (they still matter for "where are the tests") but below the real
  * definition. Covers Go (`_test.go`), JS/TS (`.test.` / `.spec.`), and test dirs. */
-export function isTestPath(path: string): boolean {
-  return /(^|\/)(tests?|__tests__|spec)\/|(_test|\.test|\.spec)\.[a-z]+$|(^|\/)(test_[^/]+|conftest)\.py$/i.test(path || "");
+export function isTestPath(path: string, language?: string): boolean {
+  return isPerlTestPath(path, language) || /(^|\/)(tests?|__tests__|spec)\/|(_test|\.test|\.spec)\.[a-z]+$|(^|\/)(test_[^/]+|conftest)\.py$/i.test(path || "");
 }
 const TEST_RANK_PENALTY = 0.35;
 
@@ -300,7 +301,7 @@ function matchedStrongTerms(
 // ── Structural intent ──────────────────────────────────────────────────────
 
 const INCOMING = /\b(caller|callers|calls?\s+into|who\s+calls|what\s+calls|called\s+by|used\s+by|uses)\b/;
-const OUTGOING = /\b(callee|callees|what\s+does\s+\w+\s+call|calls\s+what|imports?|depends\s+on)\b/;
+const OUTGOING = /\b(callee|callees|what\s+does\s+\S+\s+call|calls\s+what|imports?|depends\s+on)\b/;
 const INCOMING_RELS: Relation[] = ["calls", "references", "implements", "extends"];
 const OUTGOING_RELS: Relation[] = ["calls", "references", "imports", "implements", "extends"];
 
@@ -308,7 +309,8 @@ const OUTGOING_RELS: Relation[] = ["calls", "references", "imports", "implements
  * ("Cache.get") or package-qualified name ("pkg.Fn") survives as one token —
  * `resolveSymbol`'s own suffix/last-segment matching handles the rest. */
 function subjectWords(query: string): string[] {
-  return [...new Set(query.split(/[^A-Za-z0-9_.]+/).filter(Boolean))];
+  const words = query.match(/[\p{L}\p{N}_.$:@#/~\\()-]+/gu) ?? [];
+  return [...new Set(words.flatMap((word) => word.endsWith("()") ? [word, word.slice(0, -2)] : [word]))];
 }
 
 /** Resolve the query's structural subject via {@link resolveSymbol}, trying
@@ -377,7 +379,7 @@ function structural(query: string, graph: GraphV1, limit: number, inPrefix?: str
     const node = byId.get(other);
     hits.push({
       kind: outgoing ? "callee" : "caller",
-      title: node ? node.name : other, // unresolved import target → raw module string
+      title: node ? node.qualified_name ?? node.name : other, // unresolved import target → raw module string
       pointer: node ? `${node.path}:${node.span}` : other,
       snippet: node?.summary?.split("\n")[0].trim() ?? node?.signature ?? "",
       relation: e.relation,
@@ -507,7 +509,8 @@ function lexical(
   // (e.g. `TestDownloadStall` matching "download stall") from outranking the
   // source it exercises — the "tests ranked above the actual code" trap.
   const wantsTests = /\b(tests?|specs?|coverage|assert(?:ion)?s?|fixtures?|mocks?)\b/i.test(query);
-  const testFactor = (path: string): number => (!wantsTests && isTestPath(path) ? TEST_RANK_PENALTY : 1);
+  const fileLanguages = new Map(graph?.nodes.filter((n) => n.kind === "file").map((n) => [n.path, n.language]));
+  const testFactor = (path: string): number => (!wantsTests && isTestPath(path, fileLanguages.get(path)) ? TEST_RANK_PENALTY : 1);
 
   // ── Pass 1: tokenize every scored field once, and collect per-document token
   // bags so IDF can down-weight words that occur across the whole corpus. `--in`
@@ -561,7 +564,7 @@ function lexical(
     if (d) return { n, name: new Map(d.name), path: new Map(d.path), body: new Map(d.body) };
     return {
       n,
-      name: counts(tokenize(n.name)),
+      name: counts(tokenize(n.qualified_name ?? n.name)),
       path: counts(tokenize(n.path)),
       // The body (indexed at build) joins the signature + summary as the low-weight
       // body field, so a term that appears only in the code — not the name/signature
@@ -649,7 +652,7 @@ function lexical(
     if (!n) return null;
     const hit: AskHit = {
       kind: "symbol",
-      title: `${n.name} · ${n.kind}`,
+      title: `${n.qualified_name ?? n.name} · ${n.kind}`,
       pointer: n.kind === "file" ? n.path : `${n.path}:${n.span}`,
       snippet: n.summary?.split("\n")[0].trim() ?? n.signature ?? "",
       score: hitScore,
@@ -1457,7 +1460,7 @@ export function skeleton(dir: string, file: string, opts: { contextDir?: string 
   return {
     file: defs[0].path,
     entries: defs.map((n) => ({
-      name: n.name,
+      name: n.qualified_name ?? n.name,
       kind: n.kind,
       span: n.span,
       signature: n.signature,

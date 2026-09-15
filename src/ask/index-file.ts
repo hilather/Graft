@@ -20,6 +20,7 @@
  * which is why `df` here counts symbol/file nodes only.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { GraphV1 } from "../graph/types.js";
 import { CACHE_DIR } from "../context/node-file.js";
@@ -70,6 +71,18 @@ export interface AskIndex {
 
 export const ASK_INDEX_FILE = "ask-index.json";
 
+function digest(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+// Snapshot the loaded builder's identity once. A changed tokenizer, stop list,
+// format or Node runtime must not reuse output from an older implementation.
+// Non-file module loaders can still build an index without this optimization.
+const builderIdentity = (() => {
+  try { return digest(`${JSON.stringify(process.versions)}\0${readFileSync(new URL(import.meta.url), "utf8")}`); }
+  catch { return null; }
+})();
+
 /** Absolute path to the ask sidecar for a context dir: `<dir>/.cache/ask-index.json`.
  * `.cache/` is the established uncommitted-cache location — this sidecar is a
  * derived, regenerate-anytime cache, not checked-in graph data. */
@@ -93,15 +106,31 @@ function bagLen(p: [string, number][]): number {
  * write the resulting bags + document frequencies to
  * `<outDir>/.cache/ask-index.json`. Returns the path written. Deterministic:
  * nodes are indexed in id order, so an unchanged graph produces a
- * byte-identical sidecar.
+ * byte-identical sidecar. Unchanged inputs reuse a previously written sidecar
+ * only after checking both builder identity and its complete content hash.
  */
 export function writeAskIndex(outDir: string, graph: GraphV1): string {
   const nodes = [...graph.nodes].sort((a, b) => a.id.localeCompare(b.id));
+  const outPath = askIndexPath(outDir);
+  const statePath = join(dirname(outPath), "ask-index-state.json");
+  const inputs = createHash("sha256");
+  for (const n of nodes) inputs.update(JSON.stringify([
+    n.id, n.qualified_name ?? n.name, n.path,
+    n.signature ?? "", n.summary ?? "", n.body_text ?? "",
+  ]) + "\n");
+  const inputHash = inputs.digest("hex");
+  if (builderIdentity) {
+    try {
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      if (state?.version === 1 && state.builder === builderIdentity && state.inputHash === inputHash
+        && state.outputHash === digest(readFileSync(outPath))) return outPath;
+    } catch { /* Missing or damaged cache state/output is rebuilt below. */ }
+  }
   const docs: AskIndexDoc[] = [];
   const df = new Map<string, number>();
 
   for (const n of nodes) {
-    const name = counts(tokenize(n.name));
+    const name = counts(tokenize(n.qualified_name ?? n.name));
     const path = counts(tokenize(n.path));
     const body = counts(
       tokenize(`${n.signature ?? ""} ${n.summary ?? ""} ${n.body_text ?? ""}`),
@@ -124,9 +153,14 @@ export function writeAskIndex(outDir: string, graph: GraphV1): string {
     docs,
   };
 
-  const outPath = askIndexPath(outDir);
   mkdirSync(dirname(outPath), { recursive: true });
-  writeFileSync(outPath, JSON.stringify(index) + "\n");
+  const bytes = JSON.stringify(index) + "\n";
+  writeFileSync(outPath, bytes);
+  if (builderIdentity) {
+    try {
+      writeFileSync(statePath, JSON.stringify({ version: 1, builder: builderIdentity, inputHash, outputHash: digest(bytes) }) + "\n");
+    } catch { /* Optional reuse metadata must not prevent a usable index. */ }
+  }
   return outPath;
 }
 
