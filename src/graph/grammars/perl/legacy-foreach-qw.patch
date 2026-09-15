@@ -1,0 +1,18 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -440,8 +440,13 @@
+     ),
+     for_statement: $ =>
+       seq($._KW_FOR,
+-        optional($._for_initializer),
+-        '(', field('list', $._expr), ')',
++        choice(
++          seq(optional($._for_initializer), '(', field('list', $._expr), ')'),
++          // Pre-5.18 Perl accepted a qw list without outer parentheses when
++          // an explicit iterator preceded it. Keep that legacy source shape.
++          seq(optional(choice('my', 'our')), field('variable', $.scalar),
++            field('list', $.quoted_word_list)),
++        ),
+         $._loop_body
+       ),
+ 

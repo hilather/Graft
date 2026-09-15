@@ -48,7 +48,7 @@ console.log(`grammar queries → dist/graph/queries/ (${scmCount} .scm)`);
 const perlSrc = join(root, "src", "graph", "grammars", "perl");
 const perlOut = join(root, "dist", "graph", "grammars", "perl");
 mkdirSync(perlOut, { recursive: true });
-for (const file of ["tree-sitter-perl.wasm", "node-types.json", "provenance.json", "scanner-literal-class.patch", "prototype-attributes.patch", "LICENSE"]) {
+for (const file of ["tree-sitter-perl.wasm", "node-types.json", "provenance.json", "scanner-literal-class.patch", "prototype-attributes.patch", "legacy-foreach-qw.patch", "LICENSE"]) {
   copyFileSync(join(perlSrc, file), join(perlOut, file));
 }
 console.log("Perl grammar assets → dist/graph/grammars/perl/");
