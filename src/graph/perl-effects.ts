@@ -73,7 +73,9 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
     const project = projectOf(file);
     if (!mutatedNames.has(project)) mutatedNames.set(project, new Set());
     for (const mutation of facts.mutations) if (mutation.names.kind === "known") for (const name of mutation.names.value) {
-      mutatedNames.get(project)!.add(name);
+      // A literal replacement contributes its known body alongside the
+      // original. It does not make every routine in the project callable.
+      if (!mutation.replacementNodeId || !owners.has(mutation.replacementNodeId)) mutatedNames.get(project)!.add(name);
       if (mutation.aliasReference || mutation.replacementNodeId) for (const spelling of new Set([name, name.slice(name.lastIndexOf("::") + 2)])) {
         const id = key(file, spelling);
         aliases.set(id, [...aliases.get(id) ?? [], { file, mutation }]);
@@ -144,8 +146,9 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
     let qualified = name.includes("::") ? name : `${call.packageName}::${name}`;
     const receiver = call.form === "method" ? call.receiver : undefined;
     if (symbolEnvironment && receiver && "packageName" in receiver && !name.includes("::")) qualified = `${receiver.packageName}::${name}`;
-    const aliases = symbolEnvironment ? mutatedNames.get(projectOf(file))?.has(qualified) ?? false
-      : facts.mutations.some((mutation) => mutation.names.kind === "known" && mutation.names.value.includes(qualified));
+    const unboundedAlias = symbolEnvironment ? mutatedNames.get(projectOf(file))?.has(qualified) ?? false
+      : facts.mutations.some((mutation) => mutation.names.kind === "known" && mutation.names.value.includes(qualified)
+        && (!mutation.replacementNodeId || !owners.has(mutation.replacementNodeId)));
     const unknownAlias = facts.mutations.some((mutation) => mutation.names.kind === "unknown" && mutation.mechanism !== "framework" && (perlFileExecution(facts, mutation.scopeId) || perlExecutionScope(facts, mutation.scopeId) === perlExecutionScope(facts, call.scopeId)));
     const escapedCallback = facts.bindings.some((binding) => binding.kind === "lexical-coderef" && binding.invalidations.some((invalidation) => invalidation.reason === "escape" && invalidation.at >= call.range.start && invalidation.at <= call.range.end));
     // Bare/imported names and method names can refer to more than one package.
@@ -158,11 +161,17 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
         // A source-backed local or standard-imported spelling is stronger
         // evidence than an unrelated same-named body elsewhere in the project.
         if (own.length) scopes = own;
-      } else if (receiver && "packageName" in receiver && own.length) { scopes = [...own]; directMethod = true; }
+      } else if (receiver && "packageName" in receiver && own.length) {
+        // A possible replacement may not be installed yet. Until slot order
+        // is proven, retain inherited/same-named bodies as well as its body.
+        const replacement = aliases.get(key(file, qualified))?.some(alias => alias.mutation.replacementNodeId);
+        scopes = replacement ? [...scopes, ...own] : [...own];
+        directMethod = !replacement;
+      }
     }
     if (call.form === "method" && !directMethod) scopes.push(...names.get(key(file, "AUTOLOAD")) ?? []);
     else if (!names.has(key(file, qualified))) scopes.push(...names.get(key(file, `${qualified.slice(0, qualified.lastIndexOf("::"))}::AUTOLOAD`)) ?? []);
-    return { scopes, dynamic: aliases || unknownAlias || escapedCallback };
+    return { scopes, dynamic: unboundedAlias || unknownAlias || escapedCallback };
   };
   const targetMemo = new WeakMap<PerlCall, Dispatch>();
   const targets = (file: string, call: PerlCall): Dispatch => {

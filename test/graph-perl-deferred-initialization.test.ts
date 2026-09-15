@@ -87,3 +87,33 @@ test("deferred module loads distinguish compile lifecycle from runtime require",
     } finally { f.close(); }
   }
 });
+
+test("known replacement bodies do not activate unrelated uncalled mutators", async () => {
+  for (const invoked of [false, true]) {
+    const f = perlRepo({ "main.pl": `sub helper {} sub change { *helper = sub {}; delete $INC{'Good.pm'} } ${invoked ? 'change();' : ''} helper(); require Good; Good::run();`, "lib/Good.pm": good });
+    try { await f.build(); assert.equal(reachesGood(f), !invoked); }
+    finally { f.close(); }
+  }
+});
+
+test("replacement body calls, computed loads, competing bodies, and unknown values retain effects", async () => {
+  for (const replacement of [
+    "sub { change_path() }",
+    "sub { require $runtime_module }",
+    "$runtime_code",
+    "sub {}; *helper = sub { change_path() }",
+  ]) {
+    const f = perlRepo({ "main.pl": `sub helper {} sub change_path { delete $INC{'Good.pm'} } *helper = ${replacement}; helper(); require Good; Good::run();`, "lib/Good.pm": good });
+    try { await f.build(); assert.ok(!reachesGood(f), replacement); }
+    finally { f.close(); }
+  }
+});
+
+test("a possible replacement does not hide the effects of an inherited method", async () => {
+  const f = perlRepo({ "main.pl": "use P (); use Target (); P->helper(); Target::run();",
+    "lib/P.pm": "package P; use parent 'Base'; sub install { *helper = sub {} } 1;",
+    "lib/Base.pm": "package Base; sub helper { *Target::run = sub {} } 1;",
+    "lib/Target.pm": "package Target; sub run {} 1;" });
+  try { await f.build(); assert.ok(!semanticEdges(f.graph()).some(edge => edge.includes("Target::run"))); }
+  finally { f.close(); }
+});
