@@ -231,6 +231,9 @@ class PerlExtractor {
       const operator = left && right ? this.source.slice(left.endIndex, right.startIndex).trim() : "";
       if (left && right && ["&&", "||", "//", "and", "or"].includes(operator)) { this.walk(left, ctx); this.walk(right, { ...ctx, conditional: true }); return; }
     }
+    if (type === "func1op_call_expression" && ["defined", "exists"].includes(node.children[0]?.text ?? "")
+      && this.subroutineOperand(node, node.namedChildren.find(child => child.type !== "comment") ?? null, ctx, false)) return;
+    if (type === "undef_expression" && this.subroutineOperand(node, node.namedChildren.find(child => child.type !== "comment") ?? null, ctx, true)) return;
     if (type === "func1op_call_expression") {
       const name = node.children[0]?.text;
       if (name && PERL_NAME.test(name)) this.facts.calls.push({ ...this.context(node, ctx), form: "bare", name: known(name), syntax: "builtin" });
@@ -267,6 +270,7 @@ class PerlExtractor {
       if (ref?.type === "function") {
         const name = ref.text.replace(/^&/, "");
         this.facts.references.push({ ...this.context(node, ctx), form: PERL_NAME.test(name) ? "named-coderef" : "dynamic", name: PERL_NAME.test(name) ? known(name) : unknown("dynamic coderef") });
+        this.sequence(ref.namedChildren, ctx);
         return;
       }
     }
@@ -278,6 +282,27 @@ class PerlExtractor {
     }
     const nested = CONDITIONAL.has(type) ? { ...ctx, conditional: true } : ctx;
     this.sequence(node.namedChildren, nested);
+  }
+
+  private subroutineOperand(node: Node, operand: Node | null, ctx: WalkContext, undefine: boolean): boolean {
+    // The grammar uses the call shape for &foo in defined/exists/undef too.
+    // Parentheses on the operator/group are harmless; &foo() invokes foo.
+    while (operand?.type === "parenthesized_expression" && operand.namedChildren.filter(child => child.type !== "comment").length === 1) {
+      operand = operand.namedChildren.find(child => child.type !== "comment")!;
+    }
+    if (operand?.type !== "function_call_expression") return false;
+    const target = operand.childForFieldName("function");
+    if (!target?.text.startsWith("&") || operand.children.some(child => child.id !== target.id && child.type !== "comment")) return false;
+    if (undefine) {
+      const name = target.text.slice(1);
+      const binding = PERL_NAME.test(name) ? this.binding(name, ctx.scope.id, node.startIndex) : undefined;
+      if (binding) binding.invalidations.push({ at: node.endIndex, reason: "assignment" });
+      else this.facts.mutations.push({ ...this.context(node, ctx), names: PERL_NAME.test(name)
+        ? known([name.includes("::") ? name : `${ctx.packageName}::${name}`]) : unknown("computed subroutine undefinition") });
+    }
+    // Computing the name can execute code even though checking its slot does not.
+    this.sequence(target.namedChildren, ctx);
+    return true;
   }
 
   private substitution(node: Node, ctx: WalkContext): boolean {
@@ -616,6 +641,9 @@ class PerlExtractor {
 
   private call(node: Node, ctx: WalkContext, type: string): void {
     const args = node.childForFieldName("arguments");
+    const functionTarget = node.childForFieldName("function");
+    if (functionTarget && /^(?:CORE::)(?:defined|exists|undef)$/.test(functionTarget.text)
+      && this.subroutineOperand(node, args, ctx, functionTarget.text === "CORE::undef")) return;
     if (type === "method_call_expression") {
       const method = node.childForFieldName("method")!;
       const invocant = node.childForFieldName("invocant");
@@ -641,7 +669,8 @@ class PerlExtractor {
         const filehandle = indirectObject && !functionNode!.text.startsWith("&") && /^(?:CORE::)?(?:print|printf|say)$/.test(functionName);
         const indirect = indirectObject && !filehandle;
         const subtraction = !indirect && !functionNode!.text.startsWith("&") && type === "ambiguous_function_call_expression" && args ? this.constantSubtraction(args, functionName, node, ctx) : undefined;
-        const emptyArguments = !indirect && (!args || (args.type === "parenthesized_expression" && args.namedChildren.every((item) => item.type === "comment")));
+        const inlineArguments = functionNode!.text.startsWith("&") && !args && node.namedChildren.some(child => child.id !== functionNode!.id && child.type !== "comment");
+        const emptyArguments = !indirect && ((!args && !inlineArguments) || (args?.type === "parenthesized_expression" && args.namedChildren.every((item) => item.type === "comment")));
         this.facts.calls.push({ ...this.context(node, ctx), form: isName && !indirect ? functionName.includes("::") ? "qualified" : "bare" : "dynamic", name: isName && !indirect ? known(functionName) : unknown("computed or indirect function call"), ...(functionNode?.text.startsWith("&") ? { syntax: "ampersand" as const } : {}), ...(emptyArguments || subtraction ? { emptyArguments: true as const } : {}), ...(subtraction ? { requiresInlineConstant: subtraction, range: perlRange(functionNode!) } : {}) });
         if (filehandle) for (const block of indirectObject.namedChildren) if (block.type === "block") this.walk(block, ctx);
         if (!indirect && args && this.frameworkCall(node, ctx, functionName, args)) return;
@@ -659,15 +688,19 @@ class PerlExtractor {
         }
         if (["splice", "pop", "shift", "delete", "undef"].includes(functionName) && args) this.unknownTableMutation(args, ctx);
       }
+      if (functionNode) this.sequence(functionNode.namedChildren, ctx);
     }
-    if (args) {
+    // Ampersand calls have inline argument children rather than an arguments field.
+    const argumentNodes = args ? [args] : functionTarget?.text.startsWith("&")
+      ? node.namedChildren.filter(child => child.id !== functionTarget.id) : [];
+    for (const argument of argumentNodes) {
       // Passing a lexical coderef to unknown code can expose an alias or mutate
       // its value. Later exact calls must not rely on the original assignment.
-      for (const variable of this.hasEscapableBinding(ctx.scope.id) ? descendants(args, (n) => n.type === "scalar") : []) {
+      for (const variable of this.hasEscapableBinding(ctx.scope.id) ? descendants(argument, (n) => n.type === "scalar") : []) {
         const binding = this.binding(variableName(variable) ?? "", ctx.scope.id, variable.startIndex);
         if (binding?.kind === "lexical-coderef" || binding?.receiver) binding.invalidations.push({ at: node.endIndex, reason: "escape" });
       }
-      this.walk(args, ctx);
+      this.walk(argument, ctx);
     }
   }
 
