@@ -661,6 +661,9 @@ class PerlExtractor {
   private receiver(node: Node | null, ctx: WalkContext): PerlReceiver {
     if (!node) return { kind: "unknown", reason: "missing receiver" };
     if (node.type === "parenthesized_expression" && node.namedChildren.length === 1) return this.receiver(node.firstNamedChild, ctx);
+    if (node.type === "func0op_call_expression" && node.childForFieldName("function")?.text === "__PACKAGE__") {
+      return { kind: "package", packageName: ctx.packageName };
+    }
     const blessed = this.blessReceiver(node, ctx);
     if (blessed) return blessed;
     const name = node.type === "bareword" ? node.text : literalString(node);

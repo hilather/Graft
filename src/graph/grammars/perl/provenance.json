@@ -44,8 +44,8 @@
   },
   "files": {
     "tree-sitter-perl.wasm": {
-      "sha256": "5538f8e490ca6a1fb66522022c0c881bb5a062db2618e76d7d6e60683ff5fc3b",
-      "bytes": 4795785
+      "sha256": "2558dfc793d05e8cecceb4cd21a7fbe4fa3e6e6d14526e2b907fd8ae80e4905b",
+      "bytes": 4807434
     },
     "node-types.json": {
       "sha256": "5f037c3ef3d4a152f96184646b8122f4c6eb9168cdcd2958e08ccd916c7a2cf3",
@@ -62,6 +62,10 @@
     "prototype-attributes.patch": {
       "sha256": "2e8d47373f4f11f2735d13ae61ac13da3fcd98dbce7cfd6ae139bd99d694f1a8",
       "bytes": 1270
+    },
+    "legacy-foreach-qw.patch": {
+      "sha256": "67cb4500dc989c27e2dce22688dc6057d5f47028135a92f585241fdb880f4edb",
+      "bytes": 616
     }
   },
   "patches": [
@@ -76,6 +80,12 @@
       "path": "grammar.js",
       "resultSha256": "92d7d11345e553b4d94681ec627e6c32adb5264727c2e66f4265cae609b6a87c",
       "reason": "Accept valid named and anonymous subroutine prototypes followed by attributes, preserving existing attribute-before-signature forms."
+    },
+    {
+      "file": "legacy-foreach-qw.patch",
+      "path": "grammar.js",
+      "resultSha256": "1a5e2076ea17ed8317af872c9849899971124f6cfe730adfca9aa25dc23a0fb7",
+      "reason": "Parse pre-5.18 foreach loops with explicit scalar iterators and unparenthesized qw lists."
     }
   ]
 }
