@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "runId": "traverse.loaded-candidate-2",
+  "variant": "candidate",
+  "scenario": "traverse.loaded",
+  "trial": 2,
+  "processWallMs": 423.430560000008,
+  "durationMs": 0.8207650000000513,
+  "cpuUserMicros": 1152,
+  "cpuSystemMicros": 1022,
+  "peakRssBytes": 136192000,
+  "peakRssScope": "whole child including setup and warmup",
+  "fsWriteOperations": 0,
+  "counts": {
+    "nodes": 13500,
+    "edges": 24000,
+    "projectionFilesReplaced": 0,
+    "projectionBytesReplaced": 0
+  },
+  "semanticDigest": "e5d64c032467883a248a78067a193e365318f9ceda2c0ffed03b1b17eec47e58"
+}

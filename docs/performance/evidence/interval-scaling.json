@@ -1,0 +1,289 @@
+{
+  "node": "v20.20.2",
+  "definitions": 6000,
+  "queries": 12000,
+  "exactParity": true,
+  "scope": "isolated interval lookup; excludes parsing, queries and extraction",
+  "samples": [
+    {
+      "variant": "reference",
+      "trial": 0,
+      "durationMs": 406.32520999999997,
+      "cpuUserMicros": 317614,
+      "cpuSystemMicros": 5876
+    },
+    {
+      "variant": "candidate",
+      "trial": 0,
+      "durationMs": 1.7100199999995311,
+      "cpuUserMicros": 728,
+      "cpuSystemMicros": 970
+    },
+    {
+      "variant": "candidate",
+      "trial": 1,
+      "durationMs": 1.890795000000253,
+      "cpuUserMicros": 1884,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 1,
+      "durationMs": 431.37119300000086,
+      "cpuUserMicros": 318711,
+      "cpuSystemMicros": 1950
+    },
+    {
+      "variant": "reference",
+      "trial": 2,
+      "durationMs": 381.1475440000004,
+      "cpuUserMicros": 325163,
+      "cpuSystemMicros": 34
+    },
+    {
+      "variant": "candidate",
+      "trial": 2,
+      "durationMs": 2.045089999999618,
+      "cpuUserMicros": 1994,
+      "cpuSystemMicros": 1
+    },
+    {
+      "variant": "candidate",
+      "trial": 3,
+      "durationMs": 1.9826489999995829,
+      "cpuUserMicros": 1962,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 3,
+      "durationMs": 432.56053299999985,
+      "cpuUserMicros": 317174,
+      "cpuSystemMicros": 110
+    },
+    {
+      "variant": "reference",
+      "trial": 4,
+      "durationMs": 351.2565919999997,
+      "cpuUserMicros": 299365,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 4,
+      "durationMs": 1.0212729999993826,
+      "cpuUserMicros": 1025,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 5,
+      "durationMs": 1.171147000000019,
+      "cpuUserMicros": 1170,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 5,
+      "durationMs": 289.06665599999997,
+      "cpuUserMicros": 277842,
+      "cpuSystemMicros": 2798
+    },
+    {
+      "variant": "reference",
+      "trial": 6,
+      "durationMs": 303.09765199999947,
+      "cpuUserMicros": 274258,
+      "cpuSystemMicros": 968
+    },
+    {
+      "variant": "candidate",
+      "trial": 6,
+      "durationMs": 4.26547600000049,
+      "cpuUserMicros": 2131,
+      "cpuSystemMicros": 16
+    },
+    {
+      "variant": "candidate",
+      "trial": 7,
+      "durationMs": 4.226606999999603,
+      "cpuUserMicros": 1946,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 7,
+      "durationMs": 341.27368300000035,
+      "cpuUserMicros": 312918,
+      "cpuSystemMicros": 48
+    },
+    {
+      "variant": "reference",
+      "trial": 8,
+      "durationMs": 269.04252200000064,
+      "cpuUserMicros": 260202,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 8,
+      "durationMs": 1.8348630000000412,
+      "cpuUserMicros": 1847,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 9,
+      "durationMs": 1.369926999999734,
+      "cpuUserMicros": 1369,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 9,
+      "durationMs": 225.8024059999998,
+      "cpuUserMicros": 221902,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 10,
+      "durationMs": 245.52309999999943,
+      "cpuUserMicros": 239789,
+      "cpuSystemMicros": 13
+    },
+    {
+      "variant": "candidate",
+      "trial": 10,
+      "durationMs": 1.8321759999998903,
+      "cpuUserMicros": 1830,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 11,
+      "durationMs": 1.5724129999998695,
+      "cpuUserMicros": 1570,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 11,
+      "durationMs": 209.4856009999994,
+      "cpuUserMicros": 208243,
+      "cpuSystemMicros": 3
+    },
+    {
+      "variant": "reference",
+      "trial": 12,
+      "durationMs": 220.7805070000004,
+      "cpuUserMicros": 219404,
+      "cpuSystemMicros": 1
+    },
+    {
+      "variant": "candidate",
+      "trial": 12,
+      "durationMs": 1.6464789999999994,
+      "cpuUserMicros": 1642,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 13,
+      "durationMs": 1.6262189999997645,
+      "cpuUserMicros": 1623,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 13,
+      "durationMs": 221.5707109999994,
+      "cpuUserMicros": 220239,
+      "cpuSystemMicros": 3
+    },
+    {
+      "variant": "reference",
+      "trial": 14,
+      "durationMs": 252.74231299999974,
+      "cpuUserMicros": 251401,
+      "cpuSystemMicros": 4
+    },
+    {
+      "variant": "candidate",
+      "trial": 14,
+      "durationMs": 2.0311469999996916,
+      "cpuUserMicros": 2032,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 15,
+      "durationMs": 1.6640790000001289,
+      "cpuUserMicros": 1663,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 15,
+      "durationMs": 280.6287969999994,
+      "cpuUserMicros": 279387,
+      "cpuSystemMicros": 9
+    },
+    {
+      "variant": "reference",
+      "trial": 16,
+      "durationMs": 276.78000900000006,
+      "cpuUserMicros": 275598,
+      "cpuSystemMicros": 4
+    },
+    {
+      "variant": "candidate",
+      "trial": 16,
+      "durationMs": 1.798095000000103,
+      "cpuUserMicros": 1798,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 17,
+      "durationMs": 1.5895629999995435,
+      "cpuUserMicros": 1588,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 17,
+      "durationMs": 272.1807690000005,
+      "cpuUserMicros": 270878,
+      "cpuSystemMicros": 1
+    },
+    {
+      "variant": "reference",
+      "trial": 18,
+      "durationMs": 307.1074210000006,
+      "cpuUserMicros": 281868,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 18,
+      "durationMs": 2.6686640000007174,
+      "cpuUserMicros": 2184,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "candidate",
+      "trial": 19,
+      "durationMs": 2.369704000000638,
+      "cpuUserMicros": 1761,
+      "cpuSystemMicros": 0
+    },
+    {
+      "variant": "reference",
+      "trial": 19,
+      "durationMs": 746.3690869999991,
+      "cpuUserMicros": 319714,
+      "cpuSystemMicros": 2077
+    }
+  ]
+}

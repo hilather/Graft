@@ -27,6 +27,7 @@ import { statSync } from "node:fs";
 import { readGraph, wiringPath } from "./write.js";
 import { readAskIndex, askIndexPath, type AskIndex } from "../ask/index-file.js";
 import type { GraphV1 } from "./types.js";
+import { registerGraphSnapshot } from "./views.js";
 
 interface CacheEntry<T> {
   mtimeMs: number;
@@ -36,6 +37,8 @@ interface CacheEntry<T> {
 
 const graphCache = new Map<string, CacheEntry<GraphV1>>();
 const askIndexCache = new Map<string, CacheEntry<AskIndex>>();
+// Strong roots are bounded; snapshot lookup tables themselves use weak keys.
+const MAX_CACHED_PATHS = 8;
 
 /** Real parses performed (cache misses), not cache hits — exported for tests
  * so the invalidation contract can be pinned down without spying on `fs`. */
@@ -72,11 +75,15 @@ function loadCached<T>(
   }
   const cached = cache.get(path);
   if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+    cache.delete(path);
+    cache.set(path, cached);
     return cached.value;
   }
   onParse();
   const value = parse();
+  cache.delete(path);
   cache.set(path, { mtimeMs: st.mtimeMs, size: st.size, value });
+  while (cache.size > MAX_CACHED_PATHS) cache.delete(cache.keys().next().value!);
   return value;
 }
 
@@ -85,7 +92,10 @@ function loadCached<T>(
  * Returns a shared cached reference; callers must not mutate the returned graph. */
 export function loadGraphCached(outDir: string): GraphV1 | null {
   const path = wiringPath(outDir);
-  return loadCached(graphCache, path, () => readGraph(path), () => {
+  return loadCached(graphCache, path, () => {
+    const graph = readGraph(path);
+    return graph ? registerGraphSnapshot(graph) : null;
+  }, () => {
     __parseCount.graph++;
   });
 }

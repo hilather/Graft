@@ -1,0 +1,18 @@
+{
+  "base": "b90d73b2f601ec0d2b132c3901658882630753f8",
+  "candidate": "uncommitted worktree",
+  "variants": {
+    "reference": {
+      "dist/graph/generic.js": "78b13be9d63f4dd4b88acdc5b3dbd453fd9d4c249d4eb92a3a0963db517db944",
+      "dist/graph/container.js": "1903604731b6dffe72fbe9a602ec4ae4190a3fab29f47325fa05915de3a5fc1a",
+      "dist/graph/intervals.js": null,
+      "package-lock.json": "6d3785b12a1c7477d98a36908c768410873e19c35c114ff937d3d9e91f62c2fe"
+    },
+    "candidate": {
+      "dist/graph/generic.js": "ef7ba3cf3870b35ff80f0f470bf4fcf7e4f77ae7401eff371ceb5c1c71dcb38a",
+      "dist/graph/container.js": "2ef79637062b10e1c7ac30fbc60b1e1b16a9e6ea76b810bf32972163b1879b1e",
+      "dist/graph/intervals.js": "1703b1b0d8037631c377bab0b17e74d2e33cfb2ed16a7cea7bc0711df39709ec",
+      "package-lock.json": "6d3785b12a1c7477d98a36908c768410873e19c35c114ff937d3d9e91f62c2fe"
+    }
+  }
+}

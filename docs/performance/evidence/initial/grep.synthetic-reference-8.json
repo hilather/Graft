@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "runId": "grep.synthetic-reference-8",
+  "variant": "reference",
+  "scenario": "grep.synthetic",
+  "trial": 8,
+  "processWallMs": 2750.3223419999995,
+  "durationMs": 455.15236300000015,
+  "cpuUserMicros": 486423,
+  "cpuSystemMicros": 30019,
+  "peakRssBytes": 107847680,
+  "peakRssScope": "whole child including setup and warmup",
+  "fsWriteOperations": 0,
+  "counts": {
+    "nodes": 13500,
+    "edges": 24000,
+    "projectionFilesReplaced": 0,
+    "projectionBytesReplaced": 0
+  },
+  "semanticDigest": "c90bd3f0666431220bde6d27b014d16d7a8a623ba6c67fae5689afcff6804d29"
+}

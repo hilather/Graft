@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "runId": "build.real.cold-reference-6",
+  "variant": "reference",
+  "scenario": "build.real.cold",
+  "trial": 6,
+  "processWallMs": 22937.01701900002,
+  "durationMs": 22449.147429,
+  "cpuUserMicros": 21577358,
+  "cpuSystemMicros": 355170,
+  "peakRssBytes": 366960640,
+  "peakRssScope": "whole child including setup and warmup",
+  "fsWriteOperations": 0,
+  "counts": {
+    "files": 325,
+    "parsed": 325,
+    "reused": 0,
+    "nodes": 2548,
+    "edges": 7636,
+    "errors": [
+      "test/fixtures/perl/lexical.pm: PERL_TARGET_UNRESOLVED: Cannot establish one source target for unknown; PERL_TARGET_UNRESOLVED: Cannot establish one source target for $handler; PERL_TARGET_UNRESOLVED: Cannot establish one source target for callback"
+    ],
+    "projectionFilesReplaced": 326,
+    "projectionBytesReplaced": 242512
+  },
+  "semanticDigest": "87276625f1050b7284c497faa49cc07e04f3fed7f1a30073c6060a27b32b3f8d"
+}

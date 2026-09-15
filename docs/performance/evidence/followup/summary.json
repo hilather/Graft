@@ -1,0 +1,84 @@
+[
+  {
+    "scenario": "build.real.unchanged",
+    "samplesPerVariant": 20,
+    "reference": {
+      "medianMs": 493.6257385,
+      "minMs": 451.27923200000004,
+      "maxMs": 692.5055500000001,
+      "medianCpuMs": 739.701,
+      "medianPeakRssMiB": 176.537109375,
+      "counts": {
+        "files": 325,
+        "parsed": 0,
+        "reused": 325,
+        "nodes": 2548,
+        "edges": 7636,
+        "errors": [
+          "test/fixtures/perl/lexical.pm: PERL_TARGET_UNRESOLVED: Cannot establish one source target for unknown; PERL_TARGET_UNRESOLVED: Cannot establish one source target for $handler; PERL_TARGET_UNRESOLVED: Cannot establish one source target for callback"
+        ],
+        "projectionFilesReplaced": 326,
+        "projectionBytesReplaced": 242512
+      }
+    },
+    "candidate": {
+      "medianMs": 490.44041550000003,
+      "minMs": 448.820859,
+      "maxMs": 704.7316779999999,
+      "medianCpuMs": 750.9825000000001,
+      "medianPeakRssMiB": 175.576171875,
+      "counts": {
+        "files": 325,
+        "parsed": 0,
+        "reused": 325,
+        "nodes": 2548,
+        "edges": 7636,
+        "errors": [
+          "test/fixtures/perl/lexical.pm: PERL_TARGET_UNRESOLVED: Cannot establish one source target for unknown; PERL_TARGET_UNRESOLVED: Cannot establish one source target for $handler; PERL_TARGET_UNRESOLVED: Cannot establish one source target for callback"
+        ],
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "improvementPercent": 0.6452911085389035,
+    "exactParity": true
+  },
+  {
+    "scenario": "extract.rust.large",
+    "samplesPerVariant": 20,
+    "reference": {
+      "medianMs": 862.6526255000003,
+      "minMs": 620.6461529999997,
+      "maxMs": 2908.518659000001,
+      "medianCpuMs": 962.3295,
+      "medianPeakRssMiB": 224.62109375,
+      "counts": {
+        "definitions": 6000,
+        "references": 12000,
+        "sourceBytes": 248669,
+        "extractedSymbols": 6000,
+        "extractedCalls": 12000,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "candidate": {
+      "medianMs": 484.95179699999994,
+      "minMs": 385.1294210000001,
+      "maxMs": 2080.121999000001,
+      "medianCpuMs": 649.29,
+      "medianPeakRssMiB": 226.421875,
+      "counts": {
+        "definitions": 6000,
+        "references": 12000,
+        "sourceBytes": 248669,
+        "extractedSymbols": 6000,
+        "extractedCalls": 12000,
+        "projectionFilesReplaced": 0,
+        "projectionBytesReplaced": 0
+      }
+    },
+    "improvementPercent": 43.78365257754615,
+    "exactParity": true
+  }
+]

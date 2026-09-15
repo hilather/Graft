@@ -1,0 +1,22 @@
+{
+  "concurrencyLimit": 2,
+  "peakActiveJobs": 4,
+  "sameKeyOverlaps": 2,
+  "beforeRelease": {
+    "activeJobs": 4,
+    "reportedSize": 2,
+    "started": [
+      "a1",
+      "a2",
+      "a3",
+      "b1"
+    ]
+  },
+  "started": [
+    "a1",
+    "a2",
+    "a3",
+    "b1"
+  ],
+  "drainedSize": 0
+}

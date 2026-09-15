@@ -57,9 +57,14 @@ export class WorkQueue<T> {
 
   private pump(): void {
     while (this.running.size < this.concurrency) {
-      const next = this.pending.entries().next();
-      if (next.done) break;
-      const [key, item] = next.value;
+      // A newer job for an active key waits, while unrelated keys can use the
+      // remaining slots. The Set then counts actual active jobs correctly.
+      let next: [string, T] | undefined;
+      for (const entry of this.pending) {
+        if (!this.running.has(entry[0])) { next = entry; break; }
+      }
+      if (!next) break;
+      const [key, item] = next;
       this.pending.delete(key);
       this.running.add(key);
       void this.run(item)

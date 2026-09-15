@@ -1,0 +1,62 @@
+{
+  "variant": "reference",
+  "sample": 6,
+  "node": "v24.21.0",
+  "iterations": 600,
+  "definitions": 100,
+  "calls": 200,
+  "elapsedMs": 4817.197134,
+  "digest": "b8bd9057eca0b480483ab7f523957c26f0ff2d8185d84b70039478e4a23ffa1e",
+  "memory": [
+    {
+      "iteration": 0,
+      "rss": 73601024,
+      "heapUsed": 6046936,
+      "external": 37412470,
+      "arrayBuffers": 144287
+    },
+    {
+      "iteration": 100,
+      "rss": 132030464,
+      "heapUsed": 6558256,
+      "external": 36151893,
+      "arrayBuffers": 144287
+    },
+    {
+      "iteration": 200,
+      "rss": 156016640,
+      "heapUsed": 6535872,
+      "external": 60662357,
+      "arrayBuffers": 144287
+    },
+    {
+      "iteration": 300,
+      "rss": 184983552,
+      "heapUsed": 6554152,
+      "external": 86286933,
+      "arrayBuffers": 144287
+    },
+    {
+      "iteration": 400,
+      "rss": 222076928,
+      "heapUsed": 6535448,
+      "external": 103064149,
+      "arrayBuffers": 144287
+    },
+    {
+      "iteration": 500,
+      "rss": 246194176,
+      "heapUsed": 6563168,
+      "external": 123183701,
+      "arrayBuffers": 144287
+    },
+    {
+      "iteration": 600,
+      "rss": 270180352,
+      "heapUsed": 5459312,
+      "external": 147297303,
+      "arrayBuffers": 144287
+    }
+  ],
+  "maxRssKiB": 264104
+}

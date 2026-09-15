@@ -15,7 +15,7 @@ import {
   genericLangOf,
   isWarm,
   loadWasmLanguage,
-  parseWasm,
+  withWasmTree,
   swapGrammarForTest,
   type TsNode,
 } from "../src/graph/generic.js";
@@ -397,13 +397,14 @@ function namedOfType(root: TsNode, type: string): string[] {
 async function assertPhpWasmExtractsClassAndMethods(source: string, className: string, label: string): Promise<void> {
   const language = await loadWasmLanguage("php");
   assert.ok(language, "tree-sitter-wasm must ship a php grammar");
-  const root = parseWasm(language, source);
-  assert.ok(root, `${label}: PHP wasm parse must not crash (1.1.4 threw on heredoc/nowdoc)`);
-  const classes = namedOfType(root, "class_declaration");
-  const methods = namedOfType(root, "method_declaration");
-  assert.ok(classes.includes(className), `${label}: expected class ${className}, got: ${classes.join(", ") || "(none)"}`);
-  assert.ok(methods.includes("sql"), `${label}: expected method sql, got: ${methods.join(", ") || "(none)"}`);
-  assert.ok(methods.includes("other"), `${label}: expected method other, got: ${methods.join(", ") || "(none)"}`);
+  withWasmTree(language, source, (root) => {
+    assert.ok(root, `${label}: PHP wasm parse must not crash (1.1.4 threw on heredoc/nowdoc)`);
+    const classes = namedOfType(root, "class_declaration");
+    const methods = namedOfType(root, "method_declaration");
+    assert.ok(classes.includes(className), `${label}: expected class ${className}, got: ${classes.join(", ") || "(none)"}`);
+    assert.ok(methods.includes("sql"), `${label}: expected method sql, got: ${methods.join(", ") || "(none)"}`);
+    assert.ok(methods.includes("other"), `${label}: expected method other, got: ${methods.join(", ") || "(none)"}`);
+  });
 }
 
 test("PHP wasm grammar extracts class + methods from a heredoc file (#139)", async () => {

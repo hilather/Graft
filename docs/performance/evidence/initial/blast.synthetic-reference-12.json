@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "runId": "blast.synthetic-reference-12",
+  "variant": "reference",
+  "scenario": "blast.synthetic",
+  "trial": 12,
+  "processWallMs": 7198.340541000012,
+  "durationMs": 925.7020490000004,
+  "cpuUserMicros": 841561,
+  "cpuSystemMicros": 117844,
+  "peakRssBytes": 182943744,
+  "peakRssScope": "whole child including setup and warmup",
+  "fsWriteOperations": 0,
+  "counts": {
+    "nodes": 13500,
+    "edges": 24000,
+    "projectionFilesReplaced": 0,
+    "projectionBytesReplaced": 0
+  },
+  "semanticDigest": "139d6f84157d009c7e82fe56ac332fdd6488afd3ea1f2169425ee3cee6c44a7c"
+}

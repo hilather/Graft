@@ -1,0 +1,78 @@
+import { spawnSync, execFileSync } from "node:child_process";
+import { availableParallelism, cpus, tmpdir, totalmem } from "node:os";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
+import { digest, manifest, prepareWorkloads } from "./workload.js";
+
+const [referenceArg, candidateArg, destinationArg, ...selected] = process.argv.slice(2);
+if (!destinationArg) throw new Error("Usage: node bench/performance/dist/run.js REFERENCE CANDIDATE OUTPUT [SCENARIOS...]");
+const reference = resolve(referenceArg), candidate = resolve(candidateArg), destination = resolve(destinationArg);
+mkdirSync(destination, { recursive: true });
+const workspace = mkdtempSync(join(tmpdir(), "graft-performance-"));
+const workloads = prepareWorkloads(workspace, reference);
+const scenarios = selected.length ? selected : ["grep.synthetic", "blast.synthetic", "traverse.loaded", "projections.unchanged", "extract.rust", "build.real.cold", "build.real.unchanged"];
+const limit = (path: string) => { try { return readFileSync(path, "utf8").trim(); } catch { return null; } };
+const environment = { node: process.version, platform: process.platform, arch: process.arch, cpuModel: cpus()[0]?.model,
+  logicalCpus: cpus().length, availableParallelism: availableParallelism(), memoryBytes: totalmem(), locale: Intl.DateTimeFormat().resolvedOptions().locale,
+  cgroup: { cpuMax: limit("/sys/fs/cgroup/cpu.max"), memoryMax: limit("/sys/fs/cgroup/memory.max"), cpuset: limit("/sys/fs/cgroup/cpuset.cpus.effective"), unavailableReason: "null entries mean this cgroup-v2 file is unavailable" },
+  osCache: "uncontrolled; application cache specified per scenario", workerCount: 0 };
+const git = (args: string[]) => execFileSync("git", args, { cwd: candidate, encoding: "utf8" }).trim();
+const metadata = { schemaVersion: 1, date: new Date().toISOString(), environment, workspace,
+  reference, candidate, commit: git(["rev-parse", "HEAD"]), candidateDiffSha256: digest(git(["diff", "HEAD"])),
+  lockfileSha256: digest(readFileSync(join(candidate, "package-lock.json"))),
+  referenceDistSha256: manifest(join(reference, "dist")).sha256, candidateDistSha256: manifest(join(candidate, "dist")).sha256, workloads };
+writeFileSync(join(destination, "manifest.json"), JSON.stringify(metadata, null, 2));
+const samples: any[] = [];
+const summary: any[] = [];
+const median = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); const i = Math.floor(sorted.length / 2); return sorted.length % 2 ? sorted[i] : (sorted[i - 1] + sorted[i]) / 2; };
+const worker = join(dirname(fileURLToPath(import.meta.url)), "worker.js");
+for (const scenario of scenarios) {
+  const repetitions = scenario === "build.real.cold" ? 7 : 20;
+  // Prebuild each variant's disk cache in a separate process. The measured
+  // unchanged build must not inherit a cold parse's heap or pending GC work.
+  const contexts = new Map<string, string>();
+  if (scenario === "build.real.unchanged") {
+    for (const variant of ["reference", "candidate"]) {
+      const context = join(workspace, `prepared-${variant}`);
+      const setup = spawnSync(process.execPath, [worker, variant === "reference" ? reference : candidate, workspace,
+        "build.real.cold", join(destination, `setup-${variant}.json`), "0", context], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+      if (setup.error || setup.status !== 0) throw new Error(`Cache preparation failed: ${setup.error ?? setup.stderr}`);
+      contexts.set(variant, context);
+    }
+  }
+  for (let trial = 0; trial < repetitions; trial++) {
+    // Interleave variants; never run benchmark jobs concurrently.
+    for (const variant of trial % 2 ? ["candidate", "reference"] : ["reference", "candidate"]) {
+      const runId = `${scenario}-${variant}-${trial}`;
+      const resultPath = join(destination, `${runId}.json`);
+      const start = performance.now();
+      const child = spawnSync(process.execPath, [worker, variant === "reference" ? reference : candidate, workspace, scenario, resultPath, "5", ...contexts.has(variant) ? [contexts.get(variant)!] : []], {
+        encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env, GRAFT_TELEMETRY: "0", GRAFT_AUTO_UPDATE: "0" },
+      });
+      const processWallMs = performance.now() - start;
+      if (child.error || child.status !== 0) throw new Error(`${runId}: ${child.error ?? child.stderr}\n${child.stdout}`);
+      const measured = JSON.parse(readFileSync(resultPath, "utf8"));
+      for (const key of ["durationMs", "cpuUserMicros", "cpuSystemMicros", "peakRssBytes"]) {
+        if (!Number.isFinite(measured[key]) || measured[key] < 0) throw new Error(`Invalid ${key}: ${runId}`);
+      }
+      const sample = { schemaVersion: 1, runId, variant, scenario, trial, processWallMs, ...measured };
+      samples.push(sample);
+      writeFileSync(resultPath, JSON.stringify(sample, null, 2));
+    }
+  }
+  const select = (variant: string) => samples.filter((s) => s.scenario === scenario && s.variant === variant);
+  const baseline = select("reference"), improved = select("candidate");
+  const expected = baseline[0].semanticDigest;
+  if (![...baseline, ...improved].every((s) => s.semanticDigest === expected)) throw new Error(`Exact semantic parity failed: ${scenario}`);
+  const stats = (runs: any[]) => ({ medianMs: median(runs.map((s) => s.durationMs)), minMs: Math.min(...runs.map((s) => s.durationMs)), maxMs: Math.max(...runs.map((s) => s.durationMs)),
+    medianCpuMs: median(runs.map((s) => (s.cpuUserMicros + s.cpuSystemMicros) / 1000)), medianPeakRssMiB: median(runs.map((s) => s.peakRssBytes / 1048576)), counts: runs[0].counts });
+  const before = stats(baseline), after = stats(improved);
+  const row = { scenario, samplesPerVariant: repetitions, reference: before, candidate: after, improvementPercent: (1 - after.medianMs / before.medianMs) * 100, exactParity: true };
+  summary.push(row);
+  writeFileSync(join(destination, "summary.json"), JSON.stringify(summary, null, 2));
+  console.log(`${scenario}: ${before.medianMs.toFixed(2)} -> ${after.medianMs.toFixed(2)} ms (${row.improvementPercent.toFixed(1)}%); exact parity`);
+}
+console.log(`Raw results: ${destination}; retained workloads: ${workspace}`);

@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { contentHash } from "../util/id.js";
+import { smallestEnclosing } from "./intervals.js";
 import type { Kind, NodeV1 } from "./types.js";
 import type { ExtractResult, RawEdge } from "./extract.js";
 
@@ -189,18 +190,24 @@ export async function loadWasmLanguage(wasm: string): Promise<unknown | null> {
 
 const PARSE_CHUNK = 16384; // <32KB slices — same tree-sitter limit workaround as extract.ts
 
-/** Parse with an already-loaded grammar. Returns the root node, or null if the
- * grammar was never warmed or the parse blew up. Companion to
- * `loadWasmLanguage` for callers outside this module. */
-export function parseWasm(language: unknown, source: string): TsNode | null {
-  if (!tsMod) return null;
+/** Consume syntax nodes while their tree is alive. Parse/setup failures yield a
+ * null root; consumer errors propagate. Only plain extracted data may escape. */
+export function withWasmTree<T>(language: unknown, source: string, consume: (root: TsNode | null) => T): T {
+  let parser: import("web-tree-sitter").Parser | undefined;
+  let tree: import("web-tree-sitter").Tree | null = null;
   try {
-    const parser = new tsMod.Parser();
-    parser.setLanguage(language as never);
-    const tree = parser.parse((i: number) => source.slice(i, i + PARSE_CHUNK));
-    return (tree?.rootNode as TsNode) ?? null;
-  } catch {
-    return null;
+    try {
+      if (tsMod) {
+        parser = new tsMod.Parser();
+        parser.setLanguage(language as never);
+        tree = parser.parse((i: number) => source.slice(i, i + PARSE_CHUNK));
+      }
+    } catch {
+      // Container parsing has always treated a missing/broken grammar as no tree.
+    }
+    return consume((tree?.rootNode as TsNode) ?? null);
+  } finally {
+    try { tree?.delete(); } finally { parser?.delete(); }
   }
 }
 
@@ -225,63 +232,68 @@ export function extractGeneric(rel: string, source: string, langName: string): E
   const entry = loaded.get(langName);
   if (!entry || !tsMod) return { nodes, rawEdges };
 
-  let tree;
+  let parser: import("web-tree-sitter").Parser | undefined;
+  let tree: import("web-tree-sitter").Tree | null = null;
   try {
-    const parser = new tsMod.Parser();
-    parser.setLanguage(entry.language as never);
-    tree = parser.parse((i: number) => source.slice(i, i + PARSE_CHUNK));
-  } catch (err) {
-    // A grammar that throws (e.g. a WASM "memory access out of bounds" from an
-    // external scanner) is not a per-file syntax problem: swallowing it here left
-    // the file with only its file node and the build reporting success. Rethrow so
-    // build.ts records it in `errors`, the CLI prints it, and the extract cache
-    // remembers the failure instead of caching an empty result as clean.
-    throw new Error(`${langName} grammar threw: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (!tree) return { nodes, rawEdges };
+    try {
+      parser = new tsMod.Parser();
+      parser.setLanguage(entry.language as never);
+      tree = parser.parse((i: number) => source.slice(i, i + PARSE_CHUNK));
+    } catch (err) {
+      // A grammar that throws (e.g. a WASM "memory access out of bounds" from an
+      // external scanner) is not a per-file syntax problem: swallowing it here left
+      // the file with only its file node and the build reporting success. Rethrow so
+      // build.ts records it in `errors`, the CLI prints it, and the extract cache
+      // remembers the failure instead of caching an empty result as clean.
+      throw new Error(`${langName} grammar threw: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!tree) return { nodes, rawEdges };
 
-  const minted = new Set<string>([rel]);
-  const lines = source.split("\n");
-  const defs: Def[] = [];
-  // One definition per source span: a grammar's tags.scm can capture the same node
-  // under two @definition kinds (Swift `func` is method AND function), and the
-  // walker can revisit a nested match — both would emit near-duplicate nodes.
-  const spanSeen = new Set<number>();
-  // Mint one definition node from a whole-definition tree node. Shared by both
-  // the tags.scm path and the walker fallback so id/span/signature/body_text are
-  // built identically.
-  const mkDef = (name: string, kind: Kind, whole: TsNode): void => {
-    if (spanSeen.has(whole.startIndex)) return;
-    spanSeen.add(whole.startIndex);
-    const idBase = `${rel}#${name}`;
-    let id = idBase, n = 2;
-    while (minted.has(id)) id = `${idBase}~${n++}`;
-    minted.add(id);
-    const startRow = whole.startPosition.row, endRow = whole.endPosition.row;
-    const sigLine = (lines[startRow] ?? "").trim().replace(/\s*\{?\s*$/, "");
-    nodes.push({
-      id, name, kind, path: rel,
-      span: `L${startRow + 1}-L${endRow + 1}`,
-      signature: sigLine || null, exported: true, origin: "generic",
-      body_hash: contentHash(source.slice(whole.startIndex, whole.endIndex)),
-      body_text: source.slice(whole.startIndex, whole.endIndex).replace(/\s+/g, " ").slice(0, 5000),
-      summary_state: "pending", summary: null, crux: null,
-    });
-    defs.push({ id, startIndex: whole.startIndex, endIndex: whole.endIndex });
-  };
+    const minted = new Set<string>([rel]);
+    const lines = source.split("\n");
+    const defs: Def[] = [];
+    // One definition per source span: a grammar's tags.scm can capture the same node
+    // under two @definition kinds (Swift `func` is method AND function), and the
+    // walker can revisit a nested match — both would emit near-duplicate nodes.
+    const spanSeen = new Set<number>();
+    // Mint one definition node from a whole-definition tree node. Shared by both
+    // the tags.scm path and the walker fallback so id/span/signature/body_text are
+    // built identically.
+    const mkDef = (name: string, kind: Kind, whole: TsNode): void => {
+      if (spanSeen.has(whole.startIndex)) return;
+      spanSeen.add(whole.startIndex);
+      const idBase = `${rel}#${name}`;
+      let id = idBase, n = 2;
+      while (minted.has(id)) id = `${idBase}~${n++}`;
+      minted.add(id);
+      const startRow = whole.startPosition.row, endRow = whole.endPosition.row;
+      const sigLine = (lines[startRow] ?? "").trim().replace(/\s*\{?\s*$/, "");
+      nodes.push({
+        id, name, kind, path: rel,
+        span: `L${startRow + 1}-L${endRow + 1}`,
+        signature: sigLine || null, exported: true, origin: "generic",
+        body_hash: contentHash(source.slice(whole.startIndex, whole.endIndex)),
+        body_text: source.slice(whole.startIndex, whole.endIndex).replace(/\s+/g, " ").slice(0, 5000),
+        summary_state: "pending", summary: null, crux: null,
+      });
+      defs.push({ id, startIndex: whole.startIndex, endIndex: whole.endIndex });
+    };
 
-  if (entry.query) {
-    tagsExtract(entry.query, tree.rootNode as TsNode, rel, mkDef, defs, rawEdges, langName);
-  } else {
-    walkExtract(tree.rootNode as TsNode, mkDef); // no tags.scm → symbols only
+    if (entry.query) {
+      tagsExtract(entry.query, tree.rootNode as TsNode, rel, mkDef, defs, rawEdges, langName);
+    } else {
+      walkExtract(tree.rootNode as TsNode, mkDef); // no tags.scm → symbols only
+    }
+    // The preprocessor is invisible to tags.scm, but in C/C++ a local `#include "x.h"`
+    // IS the dependency graph — capture it as a file→file import. Likewise a Rust
+    // `use crate::…` is an in-crate module dependency.
+    if (langName === "c" || langName === "cpp") extractIncludes(tree.rootNode as TsNode, rel, rawEdges);
+    else if (langName === "rust") extractUses(tree.rootNode as TsNode, rel, rawEdges);
+    else if (langName === "php") extractPhpUses(tree.rootNode as TsNode, rel, rawEdges);
+    return { nodes, rawEdges };
+  } finally {
+    try { tree?.delete(); } finally { parser?.delete(); }
   }
-  // The preprocessor is invisible to tags.scm, but in C/C++ a local `#include "x.h"`
-  // IS the dependency graph — capture it as a file→file import. Likewise a Rust
-  // `use crate::…` is an in-crate module dependency.
-  if (langName === "c" || langName === "cpp") extractIncludes(tree.rootNode as TsNode, rel, rawEdges);
-  else if (langName === "rust") extractUses(tree.rootNode as TsNode, rel, rawEdges);
-  else if (langName === "php") extractPhpUses(tree.rootNode as TsNode, rel, rawEdges);
-  return { nodes, rawEdges };
 }
 
 /** PHP `use App\Models\User;` → a file→class-file `imports` raw edge, one per imported
@@ -413,19 +425,15 @@ function tagsExtract(
          "reference.implementation" in cap || "reference.module" in cap) && cap.name)
       refs.push({ name: cap.name.text, at: cap.name.startIndex });
   }
-  // innermost enclosing definition of a token at byte offset `at`
-  const enclosing = (at: number) =>
-    defs
-      .filter((d) => d.startIndex <= at && at < d.endIndex)
-      .sort((a, b) => (a.endIndex - a.startIndex) - (b.endIndex - b.startIndex))[0];
-  for (const c of calls) {
+  const enclosing = smallestEnclosing(defs, [...calls, ...refs].map((site) => site.at));
+  for (const [i, c] of calls.entries()) {
     if (defNameAt.has(c.at)) continue;
-    const enc = enclosing(c.at);
+    const enc = enclosing[i];
     rawEdges.push({ source: enc ? enc.id : rel, relation: "calls", file: rel, name: c.name });
   }
-  for (const r of refs) {
+  for (const [i, r] of refs.entries()) {
     if (defNameAt.has(r.at)) continue;
-    const enc = enclosing(r.at);
+    const enc = enclosing[calls.length + i];
     if (!enc) continue; // a reference with no enclosing definition has no sound source
     rawEdges.push({ source: enc.id, relation: "references", file: rel, name: r.name });
   }

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "runId": "projections.unchanged-reference-12",
+  "variant": "reference",
+  "scenario": "projections.unchanged",
+  "trial": 12,
+  "processWallMs": 2030.1413019999745,
+  "durationMs": 197.02686399999993,
+  "cpuUserMicros": 208842,
+  "cpuSystemMicros": 54322,
+  "peakRssBytes": 128200704,
+  "peakRssScope": "whole child including setup and warmup",
+  "fsWriteOperations": 0,
+  "counts": {
+    "nodes": 13500,
+    "edges": 24000,
+    "projectionFilesReplaced": 1501,
+    "projectionBytesReplaced": 1068572
+  },
+  "semanticDigest": "a706f00057ae9a3a9d517df55ba9714bb4c8682e663a2b032087abb962ca0470"
+}

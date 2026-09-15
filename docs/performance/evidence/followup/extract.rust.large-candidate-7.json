@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "runId": "extract.rust.large-candidate-7",
+  "variant": "candidate",
+  "scenario": "extract.rust.large",
+  "trial": 7,
+  "processWallMs": 12183.75205499999,
+  "durationMs": 1556.3293169999997,
+  "profiled": false,
+  "cpuUserMicros": 732462,
+  "cpuSystemMicros": 17422,
+  "peakRssBytes": 248500224,
+  "peakRssScope": "benchmark process including setup/warmup; excludes descendant processes (including the Perl worker)",
+  "fsWriteOperations": 0,
+  "counts": {
+    "definitions": 6000,
+    "references": 12000,
+    "sourceBytes": 248669,
+    "extractedSymbols": 6000,
+    "extractedCalls": 12000,
+    "projectionFilesReplaced": 0,
+    "projectionBytesReplaced": 0
+  },
+  "semanticDigest": "6cd333010d2a68d86703ae87646463c7b6d48edeb4681e11034b0efa8c1238d8"
+}

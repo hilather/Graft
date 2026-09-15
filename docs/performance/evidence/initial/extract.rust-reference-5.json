@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "runId": "extract.rust-reference-5",
+  "variant": "reference",
+  "scenario": "extract.rust",
+  "trial": 5,
+  "processWallMs": 1211.6004729999695,
+  "durationMs": 131.35167,
+  "cpuUserMicros": 211771,
+  "cpuSystemMicros": 4862,
+  "peakRssBytes": 156053504,
+  "peakRssScope": "whole child including setup and warmup",
+  "fsWriteOperations": 0,
+  "counts": {
+    "definitions": 1200,
+    "references": 2400,
+    "sourceBytes": 47069,
+    "projectionFilesReplaced": 0,
+    "projectionBytesReplaced": 0
+  },
+  "semanticDigest": "4ece5967d19cfe3e1517475602d44fcbf83f30ead6bc6a228667081fd85c193f"
+}
