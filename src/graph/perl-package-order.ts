@@ -1,7 +1,7 @@
 /** Declaration order for source packages reopened by resolved module loads. */
 import { perlFileExecution } from "./perl-context.js";
 import { PERL_LIST_BUILTINS } from "./perl-syntax.js";
-import type { PerlBinding, PerlContext, PerlDefinition, PerlFileFacts, PerlInheritance, PerlLoad, PerlModuleEnvironment, PerlSymbolMutation } from "./perl-types.js";
+import type { PerlBinding, PerlCall, PerlContext, PerlDefinition, PerlFileFacts, PerlInheritance, PerlLoad, PerlModuleEnvironment, PerlSymbolMutation } from "./perl-types.js";
 
 export interface PerlPackageTimeline {
   ordered: boolean;
@@ -13,6 +13,10 @@ export interface PerlPackageTimeline {
   uncertainInheritance: Set<string>;
 }
 type Event = { at: number } & ({ definition: PerlDefinition } | { inheritance: PerlInheritance } | { load: PerlLoad } | { alias: PerlSymbolMutation } | { capture: PerlBinding });
+type TraceEvent = Event | { at: number; call: PerlCall } | { at: number; mutation: PerlSymbolMutation };
+export interface PerlInitializationTrace {
+  events: { file: string; event: TraceEvent }[];
+}
 
 export function createPerlPackageOrder(files: ReadonlyMap<string, PerlFileFacts>, environment: PerlModuleEnvironment) {
   const entries = new Map<string, string>();
@@ -125,5 +129,81 @@ export function createPerlPackageOrder(files: ReadonlyMap<string, PerlFileFacts>
     const roots = [...reached.keys()].filter(file => [...reached.keys()].every(other => environment.reachability.get(file)?.has(other)));
     return roots.length === 1 ? timeline(roots[0]) : null;
   };
-  return { entry, deferred, timeline, forReach };
+  const incoming = new Map<string, { file: string; load: PerlLoad }[]>();
+  for (const [file, facts] of files) for (const load of facts.loads) {
+    const target = environment.loads.get(load.id);
+    if (target) incoming.set(target.file, [...incoming.get(target.file) ?? [], { file, load }]);
+  }
+  const dominators = new Map<string, boolean>();
+  const dominates = (root: string, file: string, seen = new Set<string>()): boolean => {
+    if (root === file) return true;
+    if (seen.has(file)) return false;
+    const key = `${root}\0${file}`;
+    if (dominators.has(key)) return dominators.get(key)!;
+    const callers = incoming.get(file) ?? [], next = new Set(seen).add(file);
+    const requests = new Set(callers.map(({ load }) => load.target.kind === "known"
+      ? load.targetKind === "module" ? `${load.target.value.replaceAll("::", "/")}.pm` : load.target.value : load.id));
+    const result = callers.length > 0 && requests.size === 1 && callers.every(({ file: caller, load }) => load.operation !== "do"
+      && !load.conditional && (["compile", "BEGIN", "UNITCHECK"].includes(load.phase) || perlFileExecution(files.get(caller)!, load.scopeId))
+      && dominates(root, caller, next));
+    dominators.set(key, result); return result;
+  };
+  const traceEvents = new Map<string, TraceEvent[]>();
+  const tracedFile = (file: string): TraceEvent[] => {
+    const cached = traceEvents.get(file);
+    if (cached) return cached;
+    const facts = files.get(file)!;
+    const initialized = (fact: PerlContext) => ["compile", "BEGIN", "UNITCHECK"].includes(fact.phase) || perlFileExecution(facts, fact.scopeId);
+    const after = (fact: PerlContext) => phaseOrder(facts, { ...fact, range: { ...fact.range, start: fact.range.end } });
+    const result: TraceEvent[] = [...forFile(file).filter(event => !("alias" in event) || initialized(event.alias))
+      .map(event => "alias" in event ? { ...event, at: after(event.alias) } : event),
+      ...facts.calls.filter(initialized).map(call => ({ at: after(call), call })),
+      ...facts.mutations.filter(mutation => initialized(mutation) && !mutation.aliasReference && !mutation.replacementNodeId)
+        .map(mutation => ({ at: after(mutation), mutation })),
+    ].sort((a, b) => a.at - b.at);
+    traceEvents.set(file, result); return result;
+  };
+  const traces = new WeakMap<PerlContext, PerlInitializationTrace | null>();
+  const initialization = (file: string, site: PerlContext): PerlInitializationTrace | null => {
+    if (traces.has(site)) return traces.get(site)!;
+    traces.set(site, null);
+    if (site.phase !== "runtime" || site.conditional || !perlFileExecution(files.get(file)!, site.scopeId)) return null;
+    const root = entry(file, site.packageName);
+    if (root === file || !dominates(root, file)) return null;
+    // One source capture site may execute again after %INC changes or do-file
+    // reloads. A trace of its first initialization cannot prove all instances.
+    for (const [owner, facts] of files) if (environment.reachability.get(owner)?.has(file) || environment.reachability.get(root)?.has(owner)) {
+      if (facts.includeEffects.some(effect => effect.affectsLoaded) || facts.loads.some(load => load.operation === "do")) return null;
+    }
+    const stop = phaseOrder(files.get(file)!, site), result: PerlInitializationTrace = { events: [] };
+    const active = new Set<string>(), loaded = new Map<string, string>();
+    let valid = true, stopped = false;
+    const visit = (current: string) => {
+      const facts = files.get(current)!;
+      if (active.has(current) || active.size >= 256 || facts.initializationOrderUnknown) { valid = false; return; }
+      active.add(current);
+      for (const event of tracedFile(current)) {
+        if (!valid || stopped) break;
+        if (current === file && event.at >= stop) { stopped = true; break; }
+        if ("load" in event) {
+          const load = event.load;
+          if (!["compile", "BEGIN", "UNITCHECK"].includes(load.phase) && !perlFileExecution(facts, load.scopeId)) continue;
+          const target = environment.loads.get(load.id);
+          if (target && !load.conditional && load.operation !== "do") {
+            const request = load.target.kind === "known" ? load.targetKind === "module" ? `${load.target.value.replaceAll("::", "/")}.pm` : load.target.value : load.id;
+            // Different requests for one physical file can initialize it twice.
+            if (loaded.has(target.file) && loaded.get(target.file) !== request) { valid = false; break; }
+            if (!loaded.has(target.file)) { loaded.set(target.file, request); visit(target.file); }
+          }
+        }
+        if (!stopped) result.events.push({ file: current, event });
+      }
+      if (current === file) stopped = true;
+      active.delete(current);
+    };
+    visit(root);
+    if (!valid || !stopped) return null;
+    traces.set(site, result); return result;
+  };
+  return { entry, deferred, timeline, forReach, initialization };
 }

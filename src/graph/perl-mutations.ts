@@ -3,7 +3,7 @@
 import { perlExecutionScope, perlFileExecution } from "./perl-context.js";
 import { createPerlSymbolEffectResolver } from "./perl-effects.js";
 import { perlCallerClosures } from "./perl-call-closure.js";
-import type { PerlContext, PerlFileFacts, PerlLoad, PerlModuleEnvironment, PerlSymbolMutation } from "./perl-types.js";
+import type { PerlCall, PerlContext, PerlFileFacts, PerlLoad, PerlModuleEnvironment, PerlSymbolMutation } from "./perl-types.js";
 
 export interface PerlMutationState {
   active: ReadonlySet<PerlSymbolMutation>;
@@ -316,5 +316,9 @@ export function createPerlInitializationMutations(files: ReadonlyMap<string, Per
     importMemo.set(load, result);
     return result;
   };
-  return { at, imported };
+  return { at, imported,
+    callEffects: (file: string, call: PerlCall) => mutationFacts(summaries.forCall(file, call)),
+    importEffects: (file: string, packageName: string, operation: "import" | "unimport") => mutationFacts(summaries.forImport(file, packageName, operation)),
+    invocationScopes: summaries.invocationScopes, dispatchScopes: summaries.dispatchScopes, importScopes: summaries.importScopes,
+    unknownInvocation: summaries.unknownInvocation };
 }

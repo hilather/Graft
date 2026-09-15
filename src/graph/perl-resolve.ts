@@ -7,6 +7,7 @@ import { createPerlInheritanceResolver } from "./perl-inheritance.js";
 import { createPerlPackageOrder } from "./perl-package-order.js";
 import { perlExecutionScope, perlFileExecution } from "./perl-context.js";
 import { createPerlInitializationMutations, type PerlMutationState } from "./perl-mutations.js";
+import { createPerlCaptureContext } from "./perl-capture-context.js";
 
 type Confidence = PerlModuleTarget["confidence"];
 interface Candidate { nodeId: string; confidence: Confidence }
@@ -46,6 +47,8 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
   const packageOrder = createPerlPackageOrder(files, environment);
   const inheritance = createPerlInheritanceResolver(files, environment, packageOrder);
   let initializationMutations: ReturnType<typeof createPerlInitializationMutations> | undefined;
+  const capturedInLoader = createPerlCaptureContext(files, environment, packageOrder,
+    () => initializationMutations ??= createPerlInitializationMutations(files, environment));
   const hasMutations = [...files.values()].some((facts) => facts.mutations.length);
   const definitions = new Map<string, Map<string, PerlDefinition[]>>();
   const mutationFiles = new Map([...files].flatMap(([file, facts]) => facts.mutations.map(mutation => [mutation, file] as const)));
@@ -118,6 +121,11 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
   const packageCandidates = (file: string, name: string, reached: ReadonlyMap<string, Confidence>, seen = new Set<string>(), earlyPosition?: number, ignoreFrameworkMutations = false, site?: PerlContext, captured?: PerlMutationState): Resolution => {
     const key = `${file}\0${name}`;
     if (seen.has(key)) return { candidates: [], unknown: true };
+    if (!captured && site && "form" in site && site.form === "named-coderef") {
+      const target = capturedInLoader(file, site, name);
+      if (target !== undefined) return target && byId.has(target)
+        ? { candidates: [{ nodeId: target, confidence: "inferred" }], unknown: false } : { candidates: [], unknown: true };
+    }
     const nextSeen = new Set(seen).add(key);
     const split = name.lastIndexOf("::");
     const packageName = name.slice(0, split), bare = name.slice(split + 2);

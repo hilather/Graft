@@ -338,5 +338,6 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
     forImport(file, packageName, operation);
     return importScopeMemo.get(key(file, `${packageName}::${operation}`)) ?? [];
   };
-  return { forCall, forImport, forLifecycle, forLoad, invocationScopes, unknownInvocation, invocationNames, importScopes };
+  return { forCall, forImport, forLifecycle, forLoad, invocationScopes, unknownInvocation, invocationNames, importScopes,
+    dispatchScopes: (file: string, call: PerlCall) => targets(file, call).scopes };
 }
