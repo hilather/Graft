@@ -28,7 +28,7 @@ test("views preserve single-hop duplicates/self loops, BFS order and mutable cal
   assert.notStrictEqual(graphViews(g), graphViews(g), "mutable public inputs are prepared per request");
 });
 
-test("disk snapshots reuse views and replacement, deletion and LRU eviction produce new views", () => {
+test("disk snapshots reuse views across many small repos; replacement and deletion invalidate", () => {
   const root = mkdtempSync(join(tmpdir(), "graft-views-"));
   try {
     const dir = join(root, "primary");
@@ -47,7 +47,7 @@ test("disk snapshots reuse views and replacement, deletion and LRU eviction prod
       writeGraph(graph(), extra);
       loadGraphCached(extra);
     }
-    assert.notStrictEqual(loadGraphCached(dir), second, "strong graph retention is bounded");
+    assert.strictEqual(loadGraphCached(dir), second, "small repositories must not evict a hot snapshot at nine paths");
     rmSync(dir, { recursive: true });
     assert.equal(loadGraphCached(dir), null);
   } finally { rmSync(root, { recursive: true, force: true }); }

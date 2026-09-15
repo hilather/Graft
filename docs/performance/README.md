@@ -32,7 +32,7 @@ work. Expected benefits below are not claimed speedups.
 | ID | Expected benefit | Current evaluation / work |
 | --- | --- | --- |
 | P01 | Lower fresh CLI latency and startup RSS | Still relevant. Eager CLI/refresh import paths need tracing and package-level comparisons. Synchronous public APIs must remain synchronous. |
-| P02 | Less graph preparation CPU, particularly many-file grep and many-change blast | Initial implementation: lazy lookup views; per-file grouping; shared blast preparation with separate provenance walks; reuse only for loader-owned snapshots; eight-entry LRU bounds strong loader caches. Source snippet reuse and other consumers remain to assess. |
+| P02 | Less graph preparation CPU, particularly many-file grep and many-change blast | Lazy lookup views, per-file grouping and shared blast preparation with separate provenance walks. Workspace searches reuse their loaded graph snapshots. Loader retention uses serialized-byte budgets rather than an eight-repository limit; see the review fixes below. Source snippet reuse and other consumers remain to assess. |
 | P03 | Faster repeated MCP queries with less allocation | Deferred until validated graph/index pairing. Must account for manual concept edits, filtered body tokens and bounded retention. |
 | P04 | Better scaling for overlapping definitions and many references; bounded parser/tree retention | Interval sweep, line difference array, and scoped WASM cleanup implemented. Oracle parity, failure-path cleanup, Node 24 grammar probes and repeated-parse memory comparisons pass. Native parser lifetimes are unchanged. |
 | P05 | Lower build retention, fewer hashes/stats and unnecessary grammar initializations | Source retention and all-language warmup remain in current build. Recursive dependency stamping already covers nested graph code and query files; broader grammar identities still need assessment. |
@@ -150,3 +150,40 @@ explicit runtime for both variants.
 Before publishing the branch on `719a462`, the production build and all 62 focused
 performance, generic/container extraction, and Perl overlay tests passed under
 Node 20.20.2. No new performance claim is inferred from this validation run.
+
+## PR review fixes
+
+The review identified three regressions in `cdb5d40`; regression tests reproduced
+all three before the fixes:
+
+- **Long filenames:** atomic writes now use a short, independent temporary
+  basename in the destination directory. Card generation and updates pass for
+  223-byte ASCII and multibyte source filenames.
+- **Dangling symlinks:** writes follow the intended destination and preserve the
+  link. Tests cover absolute and relative targets, chains, parent symlinks with
+  `..`, missing parent directories and cycles, alongside the existing mode and
+  permission checks.
+- **Workspace retention:** each child search consumes the graph already loaded
+  for its workspace request. Graph and index caches each retain up to 32 MiB of
+  serialized data, with a 1 KiB charge floor per entry. This replaces the fixed
+  eight-entry limit. The budget is a sizing proxy, not a parsed-heap/RSS limit;
+  working sets above it can still require reparsing. An individually oversized
+  snapshot serves its request without evicting the other hot entries.
+
+| Workspace children | Cold graph/index parses after fix | Warm graph/index parses after fix |
+| ---: | ---: | ---: |
+| 8 | 8 / 8 | 0 / 0 |
+| 9 | 9 / 9 | 0 / 0 |
+| 12 | 12 / 12 | 0 / 0 |
+| 32 | 32 / 32 | 0 / 0 |
+
+These counts come from actual federated searches over generated child graphs and
+indexes, including source inlining. Each case checks three warm requests against
+the exact cold result, then checks snapshot reuse after eviction and visibility
+of a replaced or removed child. Separate cache tests cover byte-budget eviction,
+recency, oversized entries, replacement and invalidation accounting. The production
+build and all 20 focused regression tests pass under Node 24.21.0 on Linux.
+The full Node 20.20.2 suite passed with 1,432 passes, zero failures and one
+Node-24-only skip; that breadth-grammar check passed separately on Node 24.21.0.
+The repository graph was refreshed after the fixes. Its intentional unresolved
+Perl fixture diagnostics are unchanged.

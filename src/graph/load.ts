@@ -19,15 +19,15 @@
  * On APFS (macOS) mtime is nanosecond-granular and a build takes milliseconds,
  * so invalidation is immediate and reliable.
  *
- * Dependency-free by design: this module imports only `node:fs`, `./write.js`,
- * and `../ask/index-file.js`, so it can be imported from both `ask.ts` and
- * `mcp/tools.ts` without creating an import cycle.
+ * Dependencies stay below the query and MCP layers: this module does not import
+ * `ask.ts` or `mcp/tools.ts`, so both can consume it without an import cycle.
  */
 import { statSync } from "node:fs";
 import { readGraph, wiringPath } from "./write.js";
 import { readAskIndex, askIndexPath, type AskIndex } from "../ask/index-file.js";
 import type { GraphV1 } from "./types.js";
 import { registerGraphSnapshot } from "./views.js";
+import { SizedCache } from "./sized-cache.js";
 
 interface CacheEntry<T> {
   mtimeMs: number;
@@ -35,10 +35,13 @@ interface CacheEntry<T> {
   value: T | null;
 }
 
-const graphCache = new Map<string, CacheEntry<GraphV1>>();
-const askIndexCache = new Map<string, CacheEntry<AskIndex>>();
-// Strong roots are bounded; snapshot lookup tables themselves use weak keys.
-const MAX_CACHED_PATHS = 8;
+// Retain by serialized size rather than repository count: small workspaces must
+// not start reparsing every child when a ninth repo is added. Each cache has a
+// 32 MiB budget (64 MiB combined), with a 1 KiB floor per entry. Parsed objects
+// and lazy views can occupy more heap than their serialized representations.
+const CACHE_BYTES = 32 * 1024 * 1024;
+const graphCache = new SizedCache<CacheEntry<GraphV1>>(CACHE_BYTES);
+const askIndexCache = new SizedCache<CacheEntry<AskIndex>>(CACHE_BYTES);
 
 /** Real parses performed (cache misses), not cache hits — exported for tests
  * so the invalidation contract can be pinned down without spying on `fs`. */
@@ -60,7 +63,7 @@ function statOf(path: string): { mtimeMs: number; size: number } | null {
 }
 
 function loadCached<T>(
-  cache: Map<string, CacheEntry<T>>,
+  cache: SizedCache<CacheEntry<T>>,
   path: string,
   parse: () => T | null,
   onParse: () => void,
@@ -75,15 +78,11 @@ function loadCached<T>(
   }
   const cached = cache.get(path);
   if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
-    cache.delete(path);
-    cache.set(path, cached);
     return cached.value;
   }
   onParse();
   const value = parse();
-  cache.delete(path);
-  cache.set(path, { mtimeMs: st.mtimeMs, size: st.size, value });
-  while (cache.size > MAX_CACHED_PATHS) cache.delete(cache.keys().next().value!);
+  cache.set(path, { mtimeMs: st.mtimeMs, size: st.size, value }, st.size);
   return value;
 }
 
