@@ -2,7 +2,7 @@
  * call edge. Candidate sets deliberately include competing package bodies. */
 import { perlExecutionScope, perlFileExecution } from "./perl-context.js";
 import { PERL_LIST_BUILTINS } from "./perl-syntax.js";
-import type { PerlCall, PerlContext, PerlFileFacts, PerlIncludeEffect, PerlLoad, PerlModuleEnvironment } from "./perl-types.js";
+import type { PerlBinding, PerlCall, PerlContext, PerlFileFacts, PerlIncludeEffect, PerlLoad, PerlModuleEnvironment, PerlReference, PerlSymbolMutation } from "./perl-types.js";
 
 interface Effect<T> { file: string; fact: T }
 interface Body { file: string; scope: string }
@@ -35,6 +35,7 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
   const unknownDispatchScopes = new Set<string>();
   const projectEffects = new Map<string, Effect<T>[]>();
   const mutatedNames = new Map<string, Set<string>>();
+  const aliases = new Map<string, { file: string; mutation: PerlSymbolMutation }[]>();
   const key = (file: string, name: string) => `${projectOf(file)}\0${name}`;
   for (const [file, facts] of files) {
     const definitions = new Map(facts.definitions.map((definition) => [definition.nodeId, definition]));
@@ -69,7 +70,13 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
     }
     const project = projectOf(file);
     if (!mutatedNames.has(project)) mutatedNames.set(project, new Set());
-    for (const mutation of facts.mutations) if (mutation.names.kind === "known") for (const name of mutation.names.value) mutatedNames.get(project)!.add(name);
+    for (const mutation of facts.mutations) if (mutation.names.kind === "known") for (const name of mutation.names.value) {
+      mutatedNames.get(project)!.add(name);
+      if (mutation.aliasReference || mutation.replacementNodeId) for (const spelling of new Set([name, name.slice(name.lastIndexOf("::") + 2)])) {
+        const id = key(file, spelling);
+        aliases.set(id, [...aliases.get(id) ?? [], { file, mutation }]);
+      }
+    }
     projectEffects.set(project, [...projectEffects.get(project) ?? [], ...effects, ...select(facts).filter((fact) => !effects.some((effect) => effect.fact === fact)).map((fact) => ({ file, fact }))]);
     for (const call of facts.calls) if (call.phase !== "compile" && call.phase !== "BEGIN") {
       const scope = perlExecutionScope(facts, call.scopeId);
@@ -84,23 +91,49 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
     const scope = owners.get(binding.target.value.nodeId), body = scope && bodies.get(scope);
     if (body && projectOf(body.file) !== projectOf(file)) closedProjects.delete(projectOf(file));
   }
-  const importedBodies = (file: string, packageName: string, name: string, seen = new Set<string>()): string[] => {
-    const id = `${file}\0${packageName}\0${name}`;
+  // These are possible bodies, not exact binding proofs. Saved references and
+  // replacement closures must receive incoming caller state even when the
+  // public resolver cannot yet prove when their slot was installed.
+  const namedBodies = (file: string, name: string, seen = new Set<string>()): string[] => {
+    const id = `${file}\0name:${name}`;
     if (seen.has(id)) return [];
-    const next = new Set(seen).add(id), result: string[] = [];
-    for (const binding of symbolEnvironment?.imports.get(id) ?? []) {
-      result.push(...names.get(key(binding.providerFile, `${binding.providerPackage}::${binding.exportedName}`)) ?? [],
-        ...importedBodies(binding.providerFile, binding.providerPackage, binding.exportedName, next));
+    const next = new Set(seen).add(id), result = [...names.get(key(file, name)) ?? []];
+    if (name.includes("::")) {
+      const split = name.lastIndexOf("::");
+      for (const binding of symbolEnvironment?.imports.get(`${file}\0${name.slice(0, split)}\0${name.slice(split + 2)}`) ?? []) {
+        result.push(...namedBodies(binding.providerFile, `${binding.providerPackage}::${binding.exportedName}`, next));
+      }
     }
-    return result;
+    for (const alias of aliases.get(key(file, name)) ?? []) {
+      const owner = alias.mutation.replacementNodeId && owners.get(alias.mutation.replacementNodeId);
+      if (owner) result.push(owner);
+      if (alias.mutation.aliasReference) result.push(...referenceBodies(alias.file, alias.mutation.aliasReference, next));
+    }
+    return [...new Set(result)];
+  };
+  const bindingBodies = (file: string, binding: PerlBinding, seen = new Set<string>()): string[] => {
+    const id = `${file}\0binding:${binding.id}`;
+    if (seen.has(id)) return [];
+    const owner = binding.target.kind === "known" && "nodeId" in binding.target.value ? owners.get(binding.target.value.nodeId) : undefined;
+    return [...owner ? [owner] : [], ...binding.captureReference ? referenceBodies(file, binding.captureReference, new Set(seen).add(id)) : []];
+  };
+  const referenceBodies = (file: string, reference: PerlReference, seen = new Set<string>()): string[] => {
+    if (reference.bindingId) {
+      const binding = files.get(file)!.bindings.find(binding => binding.id === reference.bindingId);
+      return binding ? bindingBodies(file, binding, seen) : [];
+    }
+    if (reference.name.kind !== "known") return [];
+    const name = reference.name.value.replace(/^&/, "");
+    return namedBodies(file, name.includes("::") ? name : `${reference.packageName}::${name}`, seen);
   };
   const computeTargets = (file: string, call: PerlCall): Dispatch => {
     const facts = files.get(file)!;
     if (call.bindingId) {
       const binding = facts.bindings.find((b) => b.id === call.bindingId);
       const owner = binding?.target.kind === "known" && "nodeId" in binding.target.value ? owners.get(binding.target.value.nodeId) : undefined;
-      if (owner && !binding!.invalidations.some((i) => i.at <= call.range.start)) return { scopes: [owner], dynamic: false };
-      return { scopes: [], dynamic: true };
+      const sameExecution = binding && perlExecutionScope(facts, binding.scopeId) === perlExecutionScope(facts, call.scopeId);
+      if (owner && !binding!.invalidations.some((i) => !sameExecution || i.at <= call.range.start)) return { scopes: [owner], dynamic: false };
+      return { scopes: binding ? bindingBodies(file, binding) : [], dynamic: true };
     }
     if (call.name.kind === "unknown" || call.form === "dynamic" || call.form === "coderef") return { scopes: [], dynamic: true };
     const name = call.name.value.replace(/^&/, "");
@@ -115,16 +148,14 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
     const escapedCallback = facts.bindings.some((binding) => binding.kind === "lexical-coderef" && binding.invalidations.some((invalidation) => invalidation.reason === "escape" && invalidation.at >= call.range.start && invalidation.at <= call.range.end));
     // Bare/imported names and method names can refer to more than one package.
     // This index is an over-approximation for side effects, not binding proof.
-    let scopes = [...names.get(key(file, name)) ?? []];
+    let scopes = namedBodies(file, name);
     let directMethod = false;
     if (symbolEnvironment) {
-      const own = names.get(key(file, qualified)) ?? [];
+      const own = namedBodies(file, qualified);
       if (call.form !== "method") {
-        const split = qualified.lastIndexOf("::");
-        const imports = importedBodies(file, qualified.slice(0, split), qualified.slice(split + 2));
         // A source-backed local or standard-imported spelling is stronger
         // evidence than an unrelated same-named body elsewhere in the project.
-        if (own.length || imports.length) scopes = [...own, ...imports];
+        if (own.length) scopes = own;
       } else if (receiver && "packageName" in receiver && own.length) { scopes = [...own]; directMethod = true; }
     }
     if (call.form === "method" && !directMethod) scopes.push(...names.get(key(file, "AUTOLOAD")) ?? []);
@@ -204,13 +235,12 @@ function createPerlSourceEffectResolver<T extends PerlContext>(files: ReadonlyMa
     const facts = files.get(file)!;
     const contained = (range: { start: number; end: number }) => range.start >= call.range.start && range.end <= call.range.end;
     const scopes = facts.scopes.filter((scope) => scope.kind === "callback" && contained(scope.range)).map((scope) => scope.id);
-    for (const reference of facts.references) if (reference.form === "named-coderef" && reference.name.kind === "known" && contained(reference.range)) scopes.push(...names.get(key(file, reference.name.value.replace(/^&/, ""))) ?? []);
+    for (const reference of facts.references) if (reference.form === "named-coderef" && contained(reference.range)) scopes.push(...referenceBodies(file, reference));
     // Escaping loses exact binding proof, but a known source callback remains
     // a possible invocation and must receive the caller's mutation state.
-    for (const binding of facts.bindings) if (binding.kind === "lexical-coderef" && binding.target.kind === "known" && "nodeId" in binding.target.value
+    for (const binding of facts.bindings) if (binding.kind === "lexical-coderef"
       && binding.invalidations.some((invalidation) => invalidation.reason === "escape" && invalidation.at >= call.range.start && invalidation.at <= call.range.end)) {
-      const owner = owners.get(binding.target.value.nodeId);
-      if (owner) scopes.push(owner);
+      scopes.push(...bindingBodies(file, binding));
     }
     callbackMemo.set(call, scopes);
     return scopes;

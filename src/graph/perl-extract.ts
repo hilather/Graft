@@ -258,6 +258,10 @@ class PerlExtractor {
     }
     if (type === "refgen_expression") {
       const ref = node.firstNamedChild;
+      if (ref?.type === "scalar") {
+        const binding = this.binding(variableName(ref) ?? "", ctx.scope.id, node.startIndex);
+        if (binding?.kind === "lexical-coderef" || binding?.receiver) binding.invalidations.push({ at: node.endIndex, reason: "escape" });
+      }
       if (ref?.type === "function") {
         const name = ref.text.replace(/^&/, "");
         this.facts.references.push({ ...this.context(node, ctx), form: PERL_NAME.test(name) ? "named-coderef" : "dynamic", name: PERL_NAME.test(name) ? known(name) : unknown("dynamic coderef") });
@@ -317,7 +321,8 @@ class PerlExtractor {
     let id: string | undefined;
     if (bindingName) {
       const qualified = `${ctx.packageName}::${bindingName}`;
-      const symbol = this.symbol(bindingName, qualified, `${qualified}@${ctx.scope.id.slice(ctx.scope.id.lastIndexOf(":") + 1)}`, "function", node, body.startIndex, ctx.owner);
+      const occurrence = bindingName.startsWith("*") ? `:${node.startIndex}` : "";
+      const symbol = this.symbol(bindingName, qualified, `${qualified}@${ctx.scope.id.slice(ctx.scope.id.lastIndexOf(":") + 1)}${occurrence}`, "function", node, body.startIndex, ctx.owner);
       id = owner = symbol.id;
       const fact: PerlDefinition = { nodeId: id, name: bindingName, qualifiedName: qualified, packageName: ctx.packageName, packageNode: ctx.packageNode, scopeId: ctx.scope.id, kind: "callback", range: perlRange(node), declarations: [perlRange(node)], hasBody: true, conditional: ctx.conditional };
       this.facts.definitions.push(fact);
@@ -434,6 +439,15 @@ class PerlExtractor {
         if (id) { binding.kind = "lexical-coderef"; binding.target = known({ nodeId: id }); this.callbackScopes.add(binding.scopeId); }
         return;
       }
+      const ref = right.type === "refgen_expression" ? right.firstNamedChild : null;
+      const refName = ref?.type === "function" ? ref.text.replace(/^&/, "") : null;
+      if (declaration === "my" && name.startsWith("$") && refName && PERL_NAME.test(refName) && !right.hasError
+        && this.source.slice(left.endIndex, right.startIndex).trim() === "=") {
+        const captureReference: PerlReference = { ...this.context(right, ctx), form: "named-coderef", name: known(refName) };
+        binding.kind = "lexical-coderef"; binding.captureReference = captureReference;
+        this.callbackScopes.add(binding.scopeId); this.facts.references.push(captureReference);
+        return;
+      }
       const receiver = this.blessReceiver(right, ctx);
       if (receiver) { binding.receiver = receiver; this.receiverScopes.add(binding.scopeId); }
     } else if (name && !declaration) {
@@ -447,12 +461,15 @@ class PerlExtractor {
       const aliasReference: PerlReference | undefined = identity && refName && PERL_NAME.test(refName) && !right.hasError
         && this.source.slice(left.endIndex, right.startIndex).trim() === "="
         ? { ...this.context(right, ctx), form: "named-coderef", name: known(refName) } : undefined;
-      if (!aliasReference) this.diagnostic("PERL_SYMBOL_TABLE_MUTATION", "Typeglob assignment does not establish a proven callable alias", node);
       const body = right.type === "anonymous_subroutine_expression" && right.namedChildren.length === 1 ? right.firstNamedChild : null;
       const emptyReplacement = body?.type === "block" && body.namedChildren.length === 0 && !right.hasError
         && this.source.slice(left.endIndex, right.startIndex).trim() === "=";
-      this.facts.mutations.push({ ...this.context(node, ctx), names: identity ? known([identity.qualifiedName]) : unknown("computed typeglob"), ...(aliasReference ? { aliasReference } : {}), ...(emptyReplacement ? { emptyReplacement: true as const } : {}) });
+      const replacementNodeId = identity && right.type === "anonymous_subroutine_expression" && !right.hasError
+        && this.source.slice(left.endIndex, right.startIndex).trim() === "=" ? this.anonymous(right, ctx, name!) : undefined;
+      if (!aliasReference && !replacementNodeId) this.diagnostic("PERL_SYMBOL_TABLE_MUTATION", "Typeglob assignment does not establish a proven callable alias", node);
+      this.facts.mutations.push({ ...this.context(node, ctx), names: identity ? known([identity.qualifiedName]) : unknown("computed typeglob"), ...(aliasReference ? { aliasReference } : {}), ...(replacementNodeId ? { replacementNodeId } : {}), ...(emptyReplacement ? { emptyReplacement: true as const } : {}) });
       if (aliasReference) { this.facts.references.push(aliasReference); return; }
+      if (replacementNodeId) return;
     }
     this.walk(right, ctx);
   }
@@ -802,6 +819,10 @@ class PerlExtractor {
         this.diagnostic("PERL_DYNAMIC_EVAL", "String eval is not statically expanded", node);
         this.facts.mutations.push({ ...this.context(node, ctx), names: unknown("string eval can change package bindings") });
         this.facts.includeEffects.push({ ...this.context(node, ctx), operation: "unknown", directories: unknown("string eval can change load state"), affectsLoaded: true, affectsCwd: true });
+        for (const binding of this.facts.bindings) if (binding.kind === "lexical-coderef"
+          && this.binding(binding.name, ctx.scope.id, node.startIndex)?.id === binding.id) {
+          binding.invalidations.push({ at: node.startIndex, reason: "mutation" });
+        }
       }
     }
     for (const { fact, node, scalar, ctx } of this.computedParents) {

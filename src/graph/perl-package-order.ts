@@ -1,17 +1,18 @@
 /** Declaration order for source packages reopened by resolved module loads. */
 import { perlFileExecution } from "./perl-context.js";
 import { PERL_LIST_BUILTINS } from "./perl-syntax.js";
-import type { PerlContext, PerlDefinition, PerlFileFacts, PerlInheritance, PerlLoad, PerlModuleEnvironment, PerlSymbolMutation } from "./perl-types.js";
+import type { PerlBinding, PerlContext, PerlDefinition, PerlFileFacts, PerlInheritance, PerlLoad, PerlModuleEnvironment, PerlSymbolMutation } from "./perl-types.js";
 
 export interface PerlPackageTimeline {
   ordered: boolean;
   definitions: Map<string, number>;
   inheritance: Map<PerlInheritance, number>;
   aliases: Map<PerlSymbolMutation, number>;
+  captures: Set<PerlBinding>;
   uncertainDefinitions: Set<string>;
   uncertainInheritance: Set<string>;
 }
-type Event = { at: number } & ({ definition: PerlDefinition } | { inheritance: PerlInheritance } | { load: PerlLoad } | { alias: PerlSymbolMutation });
+type Event = { at: number } & ({ definition: PerlDefinition } | { inheritance: PerlInheritance } | { load: PerlLoad } | { alias: PerlSymbolMutation } | { capture: PerlBinding });
 
 export function createPerlPackageOrder(files: ReadonlyMap<string, PerlFileFacts>, environment: PerlModuleEnvironment) {
   const entries = new Map<string, string>();
@@ -45,7 +46,8 @@ export function createPerlPackageOrder(files: ReadonlyMap<string, PerlFileFacts>
       ...facts.definitions.filter(definition => ["package-sub", "method", "constant"].includes(definition.kind))
         .map(definition => ({ at: definition.range.end, definition })),
       ...facts.inheritance.map(inheritance => ({ at: phaseOrder(facts, inheritance), inheritance })),
-      ...facts.mutations.filter(mutation => mutation.aliasReference).map(alias => ({ at: phaseOrder(facts, alias), alias })),
+      ...facts.mutations.filter(mutation => mutation.aliasReference || mutation.replacementNodeId).map(alias => ({ at: phaseOrder(facts, alias), alias })),
+      ...facts.bindings.filter(binding => binding.captureReference).map(capture => ({ at: phaseOrder(facts, capture.captureReference!), capture })),
       ...facts.loads.filter(load => load.targetKind !== "version" && load.targetKind !== "pragma")
         .map(load => ({ at: phaseOrder(facts, load), load })),
     ].sort((a, b) => a.at - b.at);
@@ -56,7 +58,7 @@ export function createPerlPackageOrder(files: ReadonlyMap<string, PerlFileFacts>
     const stop = site && !deferred(file, site) ? phaseOrder(files.get(file)!, site) : Infinity;
     const key = `${root}\0${stop}\0${site && deferred(file, site) ? "deferred" : "initialization"}`;
     if (timelines.has(key)) return timelines.get(key)!;
-    const result: PerlPackageTimeline = { ordered: true, definitions: new Map(), inheritance: new Map(), aliases: new Map(), uncertainDefinitions: new Set(), uncertainInheritance: new Set() };
+    const result: PerlPackageTimeline = { ordered: true, definitions: new Map(), inheritance: new Map(), aliases: new Map(), captures: new Set(), uncertainDefinitions: new Set(), uncertainInheritance: new Set() };
     const loaded = new Set<string>(), active = new Set<string>();
     let next = 0, valid = true;
     const visit = (current: string) => {
@@ -64,7 +66,9 @@ export function createPerlPackageOrder(files: ReadonlyMap<string, PerlFileFacts>
       const facts = files.get(current)!;
       if (facts.initializationOrderUnknown) valid = false;
       if (site && deferred(file, site)) {
-        const aliases = facts.mutations.filter(mutation => mutation.aliasReference && mutation.phase === "runtime" && perlFileExecution(facts, mutation.scopeId));
+        const aliases = [...facts.mutations.filter(mutation => mutation.aliasReference || mutation.replacementNodeId),
+          ...facts.bindings.flatMap(binding => binding.captureReference ? [binding.captureReference] : [])]
+          .filter(fact => fact.phase === "runtime" && perlFileExecution(facts, fact.scopeId));
         const lastAlias = Math.max(-1, ...aliases.map(alias => alias.range.start));
         const lastLoad = Math.max(-1, ...[...facts.loads, ...aliases]
           .filter(effect => effect.phase === "runtime" && perlFileExecution(facts, effect.scopeId)).map(effect => effect.range.start));
@@ -88,7 +92,10 @@ export function createPerlPackageOrder(files: ReadonlyMap<string, PerlFileFacts>
           if (["compile", "BEGIN", "UNITCHECK"].includes(fact.phase) || perlFileExecution(facts, fact.scopeId)) result.inheritance.set(fact, next++);
         } else if ("alias" in event) {
           const alias = event.alias;
-          if (!alias.conditional && facts.scopes[0]?.contextKnown && alias.scopeId === facts.scopes[0]?.id && alias.phase === "runtime") result.aliases.set(alias, next++);
+          if (!alias.conditional && facts.scopes[0]?.contextKnown && perlFileExecution(facts, alias.scopeId) && alias.phase === "runtime") result.aliases.set(alias, next++);
+        } else if ("capture" in event) {
+          const capture = event.capture, ref = capture.captureReference!;
+          if (!ref.conditional && facts.scopes[0]?.contextKnown && perlFileExecution(facts, ref.scopeId) && ref.phase === "runtime") result.captures.add(capture);
         } else {
           const load = event.load, target = environment.loads.get(load.id);
           if (!target || !(["compile", "BEGIN", "UNITCHECK"].includes(load.phase) || perlFileExecution(facts, load.scopeId))) continue;
@@ -96,7 +103,7 @@ export function createPerlPackageOrder(files: ReadonlyMap<string, PerlFileFacts>
             for (const other of environment.reachability.get(target.file)?.keys() ?? [target.file]) {
               const possible = files.get(other)!;
               for (const definition of possible.definitions) if (definition.hasBody) result.uncertainDefinitions.add(definition.qualifiedName);
-              for (const mutation of possible.mutations) if (mutation.aliasReference && mutation.names.kind === "known") for (const name of mutation.names.value) result.uncertainDefinitions.add(name);
+              for (const mutation of possible.mutations) if ((mutation.aliasReference || mutation.replacementNodeId) && mutation.names.kind === "known") for (const name of mutation.names.value) result.uncertainDefinitions.add(name);
               for (const inheritance of possible.inheritance) result.uncertainInheritance.add(inheritance.packageName);
             }
             continue;

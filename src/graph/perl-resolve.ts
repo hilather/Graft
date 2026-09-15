@@ -49,7 +49,7 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
   const hasMutations = [...files.values()].some((facts) => facts.mutations.length);
   const definitions = new Map<string, Map<string, PerlDefinition[]>>();
   const mutationFiles = new Map([...files].flatMap(([file, facts]) => facts.mutations.map(mutation => [mutation, file] as const)));
-  const aliasNames = new Set([...mutationFiles.keys()].flatMap(mutation => mutation.aliasReference && mutation.names.kind === "known" ? mutation.names.value : []));
+  const aliasNames = new Set([...mutationFiles.keys()].flatMap(mutation => (mutation.aliasReference || mutation.replacementNodeId) && mutation.names.kind === "known" ? mutation.names.value : []));
   const compileCalls = new WeakMap<PerlFileFacts, number[]>();
   const bindingIndexes = new WeakMap<PerlFileFacts, Map<string, PerlBinding>>();
   const scopeIndexes = new WeakMap<PerlFileFacts, Map<string, PerlScope>>();
@@ -131,7 +131,7 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
     const compiled = inlineSite && local.length === 1 && inlineConstantCandidate(files.get(file)!, local[0], inlineSite, compileCalls);
     const active = state && aliasNames.has(name) ? [...state.active].filter(affects) : [];
     const alias = active.length === 1 ? active[0] : undefined;
-    if (!compiled && !result.unknown && site && !captured && alias?.aliasReference) {
+    if (!compiled && !result.unknown && site && !captured && alias && (alias.aliasReference || alias.replacementNodeId)) {
       const aliasFile = mutationFiles.get(alias)!;
       const timeline = packageOrder.timeline(file, site);
       const installed = timeline?.ordered ? timeline.aliases.get(alias) : undefined;
@@ -140,10 +140,15 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
       if (installed !== undefined && !timeline!.uncertainDefinitions.has(name)
         && [...reached.keys()].every(owner => (definitions.get(owner)?.get(name) ?? []).every(definition =>
           timeline!.definitions.has(definition.nodeId) && timeline!.definitions.get(definition.nodeId)! < installed))) {
-        const ref = alias.aliasReference;
+        if (alias.replacementNodeId && byId.has(alias.replacementNodeId)) {
+          return { candidates: [{ nodeId: alias.replacementNodeId, confidence: reached.get(aliasFile) ?? "inferred" }], unknown: false };
+        }
+        const ref = alias.aliasReference!;
         const binding = liveBinding(files.get(aliasFile)!, ref);
-        if (binding?.target.kind === "known" && "nodeId" in binding.target.value && !binding.invalidations.some(i => i.at <= ref.range.start)) {
-          return { candidates: [{ nodeId: binding.target.value.nodeId, confidence: reached.get(aliasFile) ?? "inferred" }], unknown: false };
+        if (binding) {
+          const resolution = bindingCandidates(aliasFile, ref, binding, nextSeen);
+          return { ...resolution, candidates: resolution.candidates.map(candidate => ({ ...candidate,
+            confidence: weakerPerlConfidence(candidate.confidence, reached.get(aliasFile) ?? "inferred") })) };
         }
         if (!ref.bindingId && ref.name.kind === "known") {
           const target = ref.name.value.includes("::") ? ref.name.value : `${ref.packageName}::${ref.name.value}`;
@@ -237,6 +242,53 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
     }
     return undefined;
   };
+  const bindingCandidates = (file: string, site: PerlCall | PerlReference, binding: PerlBinding, seen = new Set<string>()): Resolution => {
+    const unresolved: Resolution = { candidates: [], unknown: true };
+    const key = `${file}\0binding:${binding.id}`;
+    if (seen.has(key)) return unresolved;
+    const facts = files.get(file)!;
+    const sameExecution = perlExecutionScope(facts, binding.scopeId) === perlExecutionScope(facts, site.scopeId);
+    // A closure may run after assignments textually below its definition.
+    // Capturing a CODE value freezes its identity, not the captured variable.
+    if (binding.invalidations.some(invalidation => !sameExecution || invalidation.at <= site.range.start)) return unresolved;
+    const capture = binding.captureReference;
+    if (!capture) {
+      if (binding.target.kind !== "known" || !("nodeId" in binding.target.value)) return unresolved;
+      if (binding.kind === "our-alias" && !binding.name.startsWith("$")) return packageCandidates(file,
+        `${binding.packageName}::${binding.name}`, reachableAt(file, site), seen,
+        site.phase === "compile" || site.phase === "BEGIN" ? site.range.start : undefined, false, site);
+      return { candidates: [{ nodeId: binding.target.value.nodeId, confidence: "extracted" }], unknown: false };
+    }
+    if (capture.conditional || facts.initializationOrderUnknown || capture.range.end > site.range.start) return unresolved;
+    let initialized = sameExecution && capture.phase === site.phase;
+    if (!initialized && capture.phase === "runtime" && site.phase === "runtime") {
+      // An anonymous routine created after initialization cannot be invoked
+      // before its captured value exists. Named subs compile earlier and need
+      // the stronger whole-initialization ordering proof below.
+      const scopes = scopeIndexes.get(facts)!;
+      let scope = scopes.get(perlExecutionScope(facts, site.scopeId));
+      while (scope?.kind === "callback" && scope.contextKnown && scope.parent) {
+        const parent = perlExecutionScope(facts, scope.parent);
+        if (parent === perlExecutionScope(facts, capture.scopeId)) {
+          initialized = scope.range.start >= capture.range.end;
+          break;
+        }
+        scope = scopes.get(parent);
+      }
+      if (!initialized && perlFileExecution(facts, capture.scopeId)) {
+        const timeline = packageOrder.timeline(file, site);
+        initialized = !!timeline?.ordered && timeline.captures.has(binding);
+      }
+    }
+    if (!initialized) return unresolved;
+    const next = new Set(seen).add(key);
+    const capturedBinding = liveBinding(facts, capture);
+    if (capturedBinding) return bindingCandidates(file, capture, capturedBinding, next);
+    if (capture.bindingId || capture.name.kind !== "known") return unresolved;
+    const target = capture.name.value.includes("::") ? capture.name.value : `${capture.packageName}::${capture.name.value}`;
+    return packageCandidates(file, target, reachableAt(file, capture), next,
+      capture.phase === "compile" || capture.phase === "BEGIN" ? capture.range.start : undefined, false, capture);
+  };
   const priorBareword = (file: string, site: PerlCall, qualified: string, reached: ReadonlyMap<string, Confidence>): boolean => {
     const split = qualified.lastIndexOf("::"), pkg = qualified.slice(0, split), name = qualified.slice(split + 2);
     for (const contextFile of reached.keys()) {
@@ -327,9 +379,7 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
       } else if (site.form === "modifier") {
         result = methodCandidates(file, site, site.packageName, rawName, reached, false, true);
       } else if (site.bindingId || site.form === "coderef") {
-        if (!binding || binding.target.kind !== "known" || !("nodeId" in binding.target.value) || binding.invalidations.some((i) => i.at <= site.range.start)) result = { candidates: [], unknown: true };
-        else if (binding.kind === "our-alias" && !binding.name.startsWith("$")) result = packageCandidates(file, `${binding.packageName}::${binding.name}`, reached, undefined, earlyPosition, false, site);
-        else result = { candidates: [{ nodeId: binding.target.value.nodeId, confidence: "extracted" }], unknown: false };
+        result = binding ? bindingCandidates(file, site, binding) : { candidates: [], unknown: true };
       } else if (site.form === "method") {
         let receiver = site.receiver;
         if (receiver?.kind === "lexical") {
