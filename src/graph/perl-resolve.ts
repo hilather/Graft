@@ -255,14 +255,16 @@ export function resolvePerlEdges(nodes: readonly NodeV1[], files: ReadonlyMap<st
     if (own.candidates.length || own.unknown) return own;
     if (!superCall && roleComposition(packageName, reached)) return { candidates: [], unknown: true };
     const order = inheritance.linearize(packageName, reached, { file, context: site });
-    if (order.kind === "unknown") {
-      report(file, site, "PERL_MRO_UNRESOLVED", order.reason);
-      return { candidates: [], unknown: true };
-    }
-    for (const target of order.value.slice(1)) {
+    const targets = order.kind === "known" ? order.value : /Cyclic|Inconsistent|depth bound/.test(order.reason) ? []
+      : inheritance.linearizePrefix(packageName, reached, { file, context: site });
+    for (const target of targets.slice(1)) {
       const inherited = packageCandidates(file, `${target.packageName}::${method}`, reached, undefined, early, modifier, site);
       if (inherited.candidates.length || inherited.unknown) return { unknown: inherited.unknown, candidates: inherited.candidates.map((candidate) => ({ ...candidate, confidence: weakerPerlConfidence(candidate.confidence, target.confidence) })) };
       if (roleComposition(target.packageName, reached)) return { candidates: [], unknown: true };
+    }
+    if (order.kind === "unknown") {
+      report(file, site, "PERL_MRO_UNRESOLVED", order.reason);
+      return { candidates: [], unknown: true };
     }
     return { candidates: [], unknown: false };
   };

@@ -3,7 +3,7 @@ import { posix } from "node:path";
 import type { Node } from "web-tree-sitter";
 import { contentHash } from "../util/id.js";
 import type { Kind, NodeV1 } from "./types.js";
-import type { PerlBinding, PerlContext, PerlDefinition, PerlDiagnostic, PerlExport, PerlExtractResult, PerlFileFacts, PerlKnown, PerlLoad, PerlPackageRegion, PerlPhase, PerlRange, PerlReceiver, PerlReference, PerlScope } from "./perl-types.js";
+import type { PerlBinding, PerlContext, PerlDefinition, PerlDiagnostic, PerlExport, PerlExtractResult, PerlFileFacts, PerlInheritance, PerlKnown, PerlLoad, PerlPackageRegion, PerlPhase, PerlRange, PerlReceiver, PerlReference, PerlScope } from "./perl-types.js";
 import { PERL_FACTS_VERSION } from "./perl-types.js";
 import { PERL_FRAMEWORK_DECLARATIONS, PERL_FRAMEWORK_NAMES, readPerlFrameworkDeclaration } from "./perl-frameworks.js";
 import { perlFileExecution } from "./perl-context.js";
@@ -55,6 +55,9 @@ class PerlExtractor {
   private readonly bindingsByScopeAndName = new Map<string, Map<string, PerlBinding[]>>();
   private readonly receiverScopes = new Set<string>();
   private readonly callbackScopes = new Set<string>();
+  private readonly stringInitializers = new Map<string, { value: string; context: PerlContext }>();
+  private readonly stringEvals: { node: Node; ctx: WalkContext }[] = [];
+  private readonly computedParents: { fact: PerlInheritance; node: Node; scalar: Node; ctx: WalkContext }[] = [];
   private readonly exporter = new Map<string, PerlExport["exporter"]>();
   private opaqueRecoveryStart = Infinity;
   private hasParseErrors = false;
@@ -91,6 +94,7 @@ class PerlExtractor {
     }
     const scope = this.scope(root, null, "file", this.file);
     this.sequence(root.namedChildren, { scope, packageName: "main", packageNode: null, owner: this.file, phase: "runtime", conditional: false, contextKnown: true });
+    this.finishStringEvals(root);
     this.mergeDeclarations();
     this.finishBindings();
     this.finishExports();
@@ -246,9 +250,9 @@ class PerlExtractor {
             operation: "require", targetKind: "module", target: known(required), arguments: { kind: "empty" }, trapped: true });
           return;
         }
-        this.diagnostic("PERL_DYNAMIC_EVAL", "String eval is not statically expanded", node);
-        this.facts.mutations.push({ ...this.context(node, ctx), names: unknown("string eval can change package bindings") });
-        this.facts.includeEffects.push({ ...this.context(node, ctx), operation: "unknown", directories: unknown("string eval can change load state"), affectsLoaded: true, affectsCwd: true });
+        // Finish after all lexical declarations and writes are visible. A later
+        // compiled closure can change a captured scalar before this eval runs.
+        this.stringEvals.push({ node, ctx: { ...ctx } });
         return;
       }
     }
@@ -420,6 +424,11 @@ class PerlExtractor {
     if (!name || /^[%*](?:main::)?INC$/.test(name) || name.endsWith("EXPORT_FAIL")) this.unknownTableMutation(left, ctx);
     if (name && (declaration === "my" || declaration === "state")) {
       const binding = this.newBinding(name, left, ctx, node.endIndex);
+      const value = literalString(right);
+      if (declaration === "my" && name.startsWith("$") && value !== null
+        && this.source.slice(left.endIndex, right.startIndex).trim() === "=") {
+        this.stringInitializers.set(binding.id, { value, context: this.context(node, ctx) });
+      }
       if (right.type === "anonymous_subroutine_expression") {
         const id = this.anonymous(right, ctx, name);
         if (id) { binding.kind = "lexical-coderef"; binding.target = known({ nodeId: id }); this.callbackScopes.add(binding.scopeId); }
@@ -508,7 +517,9 @@ class PerlExtractor {
     }
     if (variable[0] === "@" && identity.name === "ISA") {
       const parents = values;
-      this.facts.inheritance.push({ ...this.context(node, ctx), packageName: identity.packageName, parents, operation: append ? "append" : "replace", mechanism: "ISA", noRequire: true, mro: "dfs", unknownMutation: parents.kind === "unknown" || operator !== "=" || ctx.conditional || (ctx.phase === "runtime" && !perlFileExecution(this.facts, ctx.scope.id)) });
+      const fact: PerlInheritance = { ...this.context(node, ctx), packageName: identity.packageName, parents, operation: append ? "append" : "replace", mechanism: "ISA", noRequire: true, mro: "dfs", unknownMutation: parents.kind === "unknown" || operator !== "=" || ctx.conditional || (ctx.phase === "runtime" && !perlFileExecution(this.facts, ctx.scope.id)) };
+      this.facts.inheritance.push(fact);
+      if (append && operator === "=" && right.type === "scalar" && !rest.length && !ctx.conditional) this.computedParents.push({ fact, node, scalar: right, ctx: { ...ctx } });
       if (parents.kind === "known" && parents.value.includes("Exporter") && !ctx.conditional) this.exporter.set(identity.packageName, "inheritance");
       return;
     }
@@ -707,6 +718,98 @@ class PerlExtractor {
       if (intent.name.kind !== "known" || intent.name.value.includes("::")) continue;
       const binding = this.binding(intent.name.value, intent.scopeId, intent.range.start);
       if (binding) intent.bindingId = binding.id;
+    }
+  }
+
+  private requireInterpolation(node: Node): Node | null {
+    const string = node.namedChildren.length === 1 ? node.firstNamedChild : null;
+    if (string?.type !== "interpolated_string_literal" || string.hasError) return null;
+    const content = string.childForFieldName("content");
+    const scalar = content?.namedChildren.length === 1 ? content.firstNamedChild : null;
+    if (scalar?.type !== "scalar" || !/^\$[A-Za-z_]\w*$/.test(scalar.text)) return null;
+    return content!.text === `require ${scalar.text}` || content!.text === `require ${scalar.text};` ? scalar : null;
+  }
+
+  private finishStringEvals(root: Node): void {
+    if (!this.stringEvals.length && !this.computedParents.length) return;
+    // Only inspect the CST again for the uncommon finite-eval case. Scope
+    // ranges retain lexical identity across shadowing and compiled closures.
+    const scopes = [...this.facts.scopes].sort((a, b) => (a.range.end - a.range.start) - (b.range.end - b.range.start));
+    const scopeAt = (node: Node) => scopes.find(scope => scope.range.start <= node.startIndex && node.endIndex <= scope.range.end)!;
+    const bindingAt = (name: string, node: Node) => this.binding(name, scopeAt(node).id, node.startIndex);
+    const scalarName = (node: Node) => node.firstNamedChild?.type === "varname" ? `$${node.firstNamedChild.text}` : node.text;
+    const controlUnknown = this.hasParseErrors || descendants(root, n => n.type === "statement_label" || n.type === "label"
+      || n.type === "loopex_expression" && /^goto\b/.test(n.text)).length > 0;
+    const laterRuntime = (node: Node, site: Node) => {
+      if (node.startIndex <= site.endIndex || !perlFileExecution(this.facts, scopeAt(node).id)) return false;
+      for (let parent: Node | null = node; parent; parent = parent.parent) {
+        if (["use_statement", "use_version_statement", "phaser_statement", "class_phaser_statement"].includes(parent.type)) return false;
+      }
+      return true;
+    };
+    const finiteValues = (scalar: Node, site: Node, ctx: WalkContext): string[] | null => {
+      const binding = bindingAt(scalar.text, scalar), init = binding && this.stringInitializers.get(binding.id);
+      if (!binding || !init || controlUnknown || ctx.phase !== "runtime" || ctx.conditional
+        || !perlFileExecution(this.facts, ctx.scope.id) || init.context.phase !== "runtime" || init.context.conditional
+        || !perlFileExecution(this.facts, init.context.scopeId) || init.context.range.end > site.startIndex) return null;
+      const values = new Set([init.value]);
+      for (const { node: other } of this.stringEvals) {
+        if (laterRuntime(other, site) || bindingAt(scalar.text, other)?.id !== binding.id) continue;
+        // An unrestricted string eval can write any visible lexical, even
+        // without a CST reference to its name. Only this same bounded template
+        // is harmless to the binding being proved.
+        const ref = this.requireInterpolation(other);
+        if (!ref || bindingAt(ref.text, ref)?.id !== binding.id) return null;
+      }
+      for (const node of descendants(root, n => n.type === "scalar" || OPAQUE_PERL.has(n.type))) {
+        if (laterRuntime(node, site) || bindingAt(scalar.text, node)?.id !== binding.id) continue;
+        if (OPAQUE_PERL.has(node.type)) {
+          if (hasEmbeddedCode(node)) {
+            // A single /e replacement that never names this lexical and has
+            // no nested eval cannot write it. /ee and regex code assertions
+            // can introduce another lexical eval and remain opaque here.
+            const replacement = node.namedChildren.find(child => child.type === "replacement");
+            const modifiers = node.namedChildren.find(child => child.type === "substitution_regexp_modifiers")?.text ?? "";
+            const pattern = node.namedChildren.find(child => child.type === "regexp_content")?.text ?? "";
+            if (node.type !== "substitution_regexp" || !replacement || modifiers.split("e").length !== 2
+              || /\(\?\??\{/.test(pattern) || /\beval(?:bytes)?\b|\bgoto\b/.test(replacement.text)
+              || replacement.text.includes(scalar.text.slice(1))) return null;
+          }
+          continue;
+        }
+        if (scalarName(node) !== scalar.text) continue;
+        if (node.id === scalar.id) continue;
+        const parent = node.parent;
+        if (parent?.type === "assignment_expression" && parent.childForFieldName("left")?.id === node.id) {
+          const rhs = parent.childForFieldName("right"), value = literalString(rhs);
+          if (!rhs || value === null || this.source.slice(node.endIndex, rhs.startIndex).trim() !== "=") return null;
+          values.add(value);
+        } else if (parent?.type === "string_content" && parent.parent?.parent?.type === "eval_expression"
+          && this.requireInterpolation(parent.parent.parent)?.id === node.id) {
+          // String interpolation copies the value; it cannot expose an alias.
+        } else return null; // references, unknown calls, lvalues, and captures
+        if (values.size > 8) return null;
+      }
+      return [...values].every(value => PERL_NAME.test(value)) ? [...values].sort() : null;
+    };
+    for (const { node, ctx } of this.stringEvals) {
+      const scalar = this.requireInterpolation(node), values = scalar && finiteValues(scalar, node, ctx);
+      if (values) {
+        for (const value of values) this.facts.loads.push({ ...this.context(node, ctx), id: `${this.file}:load${this.facts.loads.length}`,
+          operation: "require", targetKind: "module", target: known(value), arguments: { kind: "empty" }, trapped: true,
+          conditional: ctx.conditional || values.length > 1 });
+      } else {
+        this.diagnostic("PERL_DYNAMIC_EVAL", "String eval is not statically expanded", node);
+        this.facts.mutations.push({ ...this.context(node, ctx), names: unknown("string eval can change package bindings") });
+        this.facts.includeEffects.push({ ...this.context(node, ctx), operation: "unknown", directories: unknown("string eval can change load state"), affectsLoaded: true, affectsCwd: true });
+      }
+    }
+    for (const { fact, node, scalar, ctx } of this.computedParents) {
+      const values = finiteValues(scalar, node, ctx);
+      if (!values) continue;
+      fact.unknownMutation = false;
+      if (values.length === 1) fact.parents = known(values);
+      else fact.parentAlternatives = values.map(value => [value]);
     }
   }
 

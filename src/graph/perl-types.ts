@@ -3,7 +3,7 @@
 import type { RawEdge } from "./extract.js";
 import type { NodeV1, Confidence } from "./types.js";
 
-export const PERL_FACTS_VERSION = 5 as const;
+export const PERL_FACTS_VERSION = 6 as const;
 export const PERL_MAX_SOURCE_CODE_UNITS = 2_000_000;
 
 export interface PerlRange {
@@ -168,6 +168,8 @@ export interface PerlReference extends PerlContext {
 
 export interface PerlInheritance extends PerlContext {
   parents: PerlKnown<string[]>;
+  /** Finite alternatives for one append; these are choices, not simultaneous parents. */
+  parentAlternatives?: string[][];
   operation: "replace" | "append";
   mechanism: "parent" | "base" | "ISA" | "class" | "framework" | "mro";
   noRequire: boolean;
